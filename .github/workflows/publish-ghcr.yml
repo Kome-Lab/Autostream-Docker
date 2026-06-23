@@ -29,7 +29,7 @@ env:
   SOURCE_OWNER: ${{ inputs.source_owner || github.repository_owner }}
   PUSH_IMAGES: ${{ github.ref_type == 'tag' || inputs.push_images }}
   REGISTRY: ghcr.io
-  IMAGE_NAMESPACE: ${{ github.repository_owner }}/autostream-docker
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}/Autostream-Docker
 
 jobs:
   publish:
@@ -40,19 +40,19 @@ jobs:
       matrix:
         include:
           - service: control-panel
-            repo: autostream-control-panel
+            repo: Autostream-ControlPanel
             dockerfile: services/control-panel/Dockerfile
           - service: discord-bot
-            repo: autostream-discord-bot
+            repo: Autostream-DiscordBot
             dockerfile: services/discord-bot/Dockerfile
           - service: encoder-recorder
-            repo: autostream-encoder-recorder
+            repo: Autostream-Encoder-Recorder
             dockerfile: services/encoder-recorder/Dockerfile
           - service: observability
-            repo: autostream-observability
+            repo: Autostream-Observability
             dockerfile: services/observability/Dockerfile
           - service: worker
-            repo: autostream-worker
+            repo: Autostream-Worker
             dockerfile: services/worker/Dockerfile
 
     steps:
