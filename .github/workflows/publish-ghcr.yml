@@ -70,13 +70,28 @@ jobs:
         with:
           path: dockerfiles
 
+      - name: Verify source access
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/${SOURCE_OWNER}/${{ matrix.repo }}" >/dev/null; then
+            echo "::error::Cannot access ${SOURCE_OWNER}/${{ matrix.repo }}. Set AUTOSTREAM_SOURCE_TOKEN or GITHUBTOKEN with read access to the private source repositories." >&2
+            exit 1
+          fi
+          if ! gh api "repos/${SOURCE_OWNER}/${{ matrix.repo }}/git/ref/tags/${VERSION}" >/dev/null; then
+            echo "::error::Missing source tag ${VERSION} in ${SOURCE_OWNER}/${{ matrix.repo }}." >&2
+            exit 1
+          fi
+
       - name: Checkout source
         uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_OWNER }}/${{ matrix.repo }}
           ref: ${{ env.VERSION }}
           path: source/${{ matrix.repo }}
-          token: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || github.token }}
+          token: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
 
       - uses: docker/setup-qemu-action@v4
 
@@ -88,14 +103,15 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUBTOKEN }}
+          password: ${{ secrets.GITHUBTOKEN || github.token }}
 
       - name: Compute image tags
         id: image_tags
         shell: bash
         run: |
           set -euo pipefail
-          image="${REGISTRY}/${IMAGE_NAMESPACE}/${{ matrix.service }}"
+          image_namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          image="${REGISTRY}/${image_namespace}/${{ matrix.service }}"
           {
             echo "tags<<EOF"
             echo "${image}:${VERSION}"

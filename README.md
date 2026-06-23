@@ -36,4 +36,9 @@ Manual publish:
 gh workflow run publish-ghcr.yml -f version=v1.2.3 -f source_owner=<owner> -f push_images=true
 ```
 
-If the source repositories are private, set `AUTOSTREAM_SOURCE_TOKEN` in this repository. Do not put provider secrets or runtime `.env` values in this repository.
+If the source repositories are private, set one of these repository secrets in `Autostream-Docker`:
+
+- `AUTOSTREAM_SOURCE_TOKEN` with read access to the private source repositories.
+- `GITHUBTOKEN` with read access to the private source repositories. This name is also used for GHCR login when present.
+
+The built-in `GITHUB_TOKEN` is only enough when the source repositories are public or otherwise readable by the workflow. Do not put provider secrets or runtime `.env` values in this repository.
