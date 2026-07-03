@@ -1,4 +1,4 @@
-﻿FROM node:26-alpine AS web
+FROM node:26-alpine AS web
 WORKDIR /src
 COPY web/package*.json ./web/
 RUN cd web && npm ci --no-audit --no-fund
@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 
 FROM gcr.io/distroless/base-debian13
 COPY --from=build /out/control-panel /usr/local/bin/control-panel
-COPY --from=web /src/web/dist /usr/share/autostream-control-panel
+COPY --from=web /src/web/out /usr/share/autostream-control-panel
 ENV AUTOSTREAM_WEB_DIR=/usr/share/autostream-control-panel
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/control-panel"]

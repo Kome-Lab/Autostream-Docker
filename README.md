@@ -2,6 +2,16 @@
 
 This repository stores Dockerfiles for AutoStream runtime services.
 
+Runtime environment values are supplied by the deployment compose file, not by
+these images. Only Control Panel and Observability require `DATABASE_URL`.
+Encoder/Recorder, Worker, and Discord Bot do not have their own MariaDB
+database; they receive runtime configuration from Control Panel.
+
+Node services expect a Panel-generated Node Agent config mounted at
+`/etc/autostream-node/config.yml` by default. Compose files may point
+`AUTOSTREAM_NODE_CONFIG` at a service-specific read-only mount when multiple
+nodes run on the same host.
+
 ## Services
 
 - `services/control-panel/Dockerfile`

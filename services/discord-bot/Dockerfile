@@ -1,4 +1,4 @@
-﻿FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -8,5 +8,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 
 FROM gcr.io/distroless/base-debian13
 COPY --from=build /out/discord-bot /usr/local/bin/discord-bot
+ENV AUTOSTREAM_NODE_CONFIG=/etc/autostream-node/config.yml
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/discord-bot"]

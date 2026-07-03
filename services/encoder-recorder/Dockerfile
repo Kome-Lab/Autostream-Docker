@@ -1,4 +1,4 @@
-﻿FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -14,5 +14,6 @@ RUN apt-get update \
     && mkdir -p /var/lib/autostream/encoder-recorder /var/lib/autostream/archives \
     && chown -R 65532:65532 /var/lib/autostream
 COPY --from=build /out/encoder-recorder /usr/local/bin/encoder-recorder
+ENV AUTOSTREAM_NODE_CONFIG=/etc/autostream-node/config.yml
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/encoder-recorder"]
