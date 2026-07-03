@@ -22,7 +22,12 @@ nodes run on the same host.
 
 ## Publish Images
 
-The GitHub Actions workflow in `.github/workflows/publish-ghcr.yml` builds all service images from matching source repository tags and publishes them to GHCR.
+The GitHub Actions workflow in `.github/workflows/publish-ghcr.yml` builds all service images and publishes them to GHCR.
+AutoStream services can have different source repository versions. The workflow resolves each service source tag in this order:
+
+1. Matching workflow dispatch input such as `control_panel_version` or `worker_version`.
+2. `source-versions.env` in this repository.
+3. The Docker image `version` input or pushed tag.
 
 Image names:
 
@@ -38,6 +43,20 @@ Manual dry-run:
 
 ```bash
 gh workflow run publish-ghcr.yml -f version=v1.2.3 -f source_owner=<owner> -f push_images=false
+```
+
+Manual dry-run with mixed service source versions:
+
+```bash
+gh workflow run publish-ghcr.yml \
+  -f version=v1.2.3 \
+  -f source_owner=<owner> \
+  -f control_panel_version=v1.2.3 \
+  -f discord_bot_version=v1.0.1 \
+  -f encoder_recorder_version=v1.0.1 \
+  -f observability_version=v1.0.0 \
+  -f worker_version=v1.0.0 \
+  -f push_images=false
 ```
 
 Manual publish:

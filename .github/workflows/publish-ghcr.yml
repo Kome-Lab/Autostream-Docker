@@ -3,7 +3,7 @@
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]*"
   workflow_dispatch:
     inputs:
       version:
@@ -13,6 +13,31 @@ on:
       source_owner:
         description: "GitHub owner/org containing the AutoStream source repositories"
         required: true
+        type: string
+      control_panel_version:
+        description: "Control Panel source tag. Blank uses source-versions.env, then version."
+        required: false
+        default: ""
+        type: string
+      discord_bot_version:
+        description: "Discord Bot source tag. Blank uses source-versions.env, then version."
+        required: false
+        default: ""
+        type: string
+      encoder_recorder_version:
+        description: "Encoder Recorder source tag. Blank uses source-versions.env, then version."
+        required: false
+        default: ""
+        type: string
+      observability_version:
+        description: "Observability source tag. Blank uses source-versions.env, then version."
+        required: false
+        default: ""
+        type: string
+      worker_version:
+        description: "Worker source tag. Blank uses source-versions.env, then version."
+        required: false
+        default: ""
         type: string
       push_images:
         description: "Push images to GHCR"
@@ -60,6 +85,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${VERSION}" =~ ^v\. ]]; then
+            echo "::error::Version must look like v1.2.3, not ${VERSION}. Remove the dot after v." >&2
+            exit 1
+          fi
           if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
             echo "Version must look like v1.2.3; got ${VERSION}" >&2
             exit 1
@@ -69,6 +98,44 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: dockerfiles
+
+      - name: Resolve source version
+        id: source_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_version=""
+          case "${{ matrix.service }}" in
+            control-panel) source_version="${{ inputs.control_panel_version }}" ;;
+            discord-bot) source_version="${{ inputs.discord_bot_version }}" ;;
+            encoder-recorder) source_version="${{ inputs.encoder_recorder_version }}" ;;
+            observability) source_version="${{ inputs.observability_version }}" ;;
+            worker) source_version="${{ inputs.worker_version }}" ;;
+          esac
+          if [[ -z "${source_version}" && -f dockerfiles/source-versions.env ]]; then
+            # shellcheck disable=SC1091
+            source dockerfiles/source-versions.env
+            case "${{ matrix.service }}" in
+              control-panel) source_version="${CONTROL_PANEL_SOURCE_VERSION:-}" ;;
+              discord-bot) source_version="${DISCORD_BOT_SOURCE_VERSION:-}" ;;
+              encoder-recorder) source_version="${ENCODER_RECORDER_SOURCE_VERSION:-}" ;;
+              observability) source_version="${OBSERVABILITY_SOURCE_VERSION:-}" ;;
+              worker) source_version="${WORKER_SOURCE_VERSION:-}" ;;
+            esac
+          fi
+          if [[ -z "${source_version}" ]]; then
+            source_version="${VERSION}"
+          fi
+          if [[ "${source_version}" =~ ^v\. ]]; then
+            echo "::error::Source version must look like v1.2.3, not ${source_version}. Remove the dot after v." >&2
+            exit 1
+          fi
+          if [[ ! "${source_version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Source version must look like v1.2.3; got ${source_version}" >&2
+            exit 1
+          fi
+          echo "source_version=${source_version}" >> "${GITHUB_OUTPUT}"
+          echo "Using ${{ matrix.repo }} source tag ${source_version} for image ${VERSION}."
 
       - name: Verify source access
         shell: bash
@@ -80,8 +147,8 @@ jobs:
             echo "::error::Cannot access ${SOURCE_OWNER}/${{ matrix.repo }}. Set AUTOSTREAM_SOURCE_TOKEN or GITHUBTOKEN with read access to the private source repositories." >&2
             exit 1
           fi
-          if ! gh api "repos/${SOURCE_OWNER}/${{ matrix.repo }}/git/ref/tags/${VERSION}" >/dev/null; then
-            echo "::error::Missing source tag ${VERSION} in ${SOURCE_OWNER}/${{ matrix.repo }}." >&2
+          if ! gh api "repos/${SOURCE_OWNER}/${{ matrix.repo }}/git/ref/tags/${{ steps.source_version.outputs.source_version }}" >/dev/null; then
+            echo "::error::Missing source tag ${{ steps.source_version.outputs.source_version }} in ${SOURCE_OWNER}/${{ matrix.repo }}. If service versions differ, set the matching *_version workflow input or update source-versions.env." >&2
             exit 1
           fi
 
@@ -89,7 +156,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: ${{ env.SOURCE_OWNER }}/${{ matrix.repo }}
-          ref: ${{ env.VERSION }}
+          ref: ${{ steps.source_version.outputs.source_version }}
           path: source/${{ matrix.repo }}
           token: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
 
@@ -132,4 +199,5 @@ jobs:
           labels: |
             org.opencontainers.image.title=AutoStream ${{ matrix.service }}
             org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ steps.source_version.outputs.source_version }}
             org.opencontainers.image.source=https://github.com/${{ env.SOURCE_OWNER }}/${{ matrix.repo }}
