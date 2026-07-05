@@ -1,7 +1,10 @@
-FROM node:26-alpine AS web
+# syntax=docker/dockerfile:1.7
+
+FROM node:24-bookworm-slim AS web
 WORKDIR /src
 COPY web/package*.json ./web/
-RUN cd web && npm ci --no-audit --no-fund
+RUN --mount=type=cache,target=/root/.npm \
+    cd web && npm ci --no-audit --no-fund --progress=false
 COPY . .
 RUN cd web && npm run build \
     && if [ -d out ]; then cp -a out /tmp/autostream-control-panel-web; \
