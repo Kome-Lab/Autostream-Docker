@@ -54,8 +54,8 @@ gh workflow run publish-ghcr.yml \
   -f control_panel_version=v1.2.3 \
   -f discord_bot_version=v1.0.1 \
   -f encoder_recorder_version=v1.0.1 \
-  -f observability_version=v1.0.0 \
-  -f worker_version=v1.0.0 \
+  -f observability_version=v1.0.1 \
+  -f worker_version=v1.0.1 \
   -f push_images=false
 ```
 
