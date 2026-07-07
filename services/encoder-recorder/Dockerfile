@@ -1,10 +1,13 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
 WORKDIR /src
 COPY . .
 RUN go mod download
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/autostream-encoder-recorder ./cmd/encoder-recorder
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X github.com/example/autostream-encoder-recorder/internal/version.Version=${VERSION} -X github.com/example/autostream-encoder-recorder/internal/version.Commit=${COMMIT} -X github.com/example/autostream-encoder-recorder/internal/version.BuildDate=${BUILD_DATE}" -o /out/autostream-encoder-recorder ./cmd/encoder-recorder
 
 FROM debian:trixie-slim
 RUN apt-get update \

@@ -160,6 +160,14 @@ jobs:
           path: source/${{ matrix.repo }}
           token: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
 
+      - name: Resolve build metadata
+        id: build_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "source_commit=$(git -C "source/${{ matrix.repo }}" rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+
       - uses: docker/setup-qemu-action@v4
 
       - uses: docker/setup-buildx-action@v4
@@ -196,8 +204,12 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ env.PUSH_IMAGES == 'true' }}
           tags: ${{ steps.image_tags.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.source_version.outputs.source_version }}
+            COMMIT=${{ steps.build_meta.outputs.source_commit }}
+            BUILD_DATE=${{ steps.build_meta.outputs.build_date }}
           labels: |
             org.opencontainers.image.title=AutoStream ${{ matrix.service }}
             org.opencontainers.image.version=${{ env.VERSION }}
-            org.opencontainers.image.revision=${{ steps.source_version.outputs.source_version }}
+            org.opencontainers.image.revision=${{ steps.build_meta.outputs.source_commit }}
             org.opencontainers.image.source=https://github.com/${{ env.SOURCE_OWNER }}/${{ matrix.repo }}
