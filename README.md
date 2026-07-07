@@ -8,9 +8,11 @@ Encoder/Recorder, Worker, and Discord Bot do not have their own MariaDB
 database; they receive runtime configuration from Control Panel.
 
 Node services expect a Panel-generated Node Agent config mounted at
-`/etc/autostream-node/config.yml` by default. Compose files may point
+`/etc/autostream-<service>/config.yml` by default. Compose files may point
 `AUTOSTREAM_NODE_CONFIG` at a service-specific read-only mount when multiple
-nodes run on the same host.
+nodes run on the same host. Service images run as nonroot, so bind-mounted
+config files should be readable by container group `65532` and kept non-world
+readable, for example `root:65532` with mode `0640`.
 
 ## Services
 
