@@ -51,6 +51,10 @@ Each architecture build pushes an architecture-specific tag such as
 workflow then creates the multi-architecture `<version>` manifest and, for
 stable release tags, the `latest` manifest.
 
+Docker layer cache is bounded with `max-cache-size-mb`. The publish workflow
+does not delete Blacksmith sticky disks after each build; cache cleanup should
+be handled separately when it is actually needed.
+
 Manual dry-run:
 
 ```bash

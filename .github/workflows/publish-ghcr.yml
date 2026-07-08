@@ -177,7 +177,7 @@ jobs:
 
       - uses: useblacksmith/setup-docker-builder@v1
         with:
-          max-cache-size-mb: "0"
+          max-cache-size-mb: "10240"
 
       - name: Login to GHCR
         if: env.PUSH_IMAGES == 'true'
@@ -218,11 +218,6 @@ jobs:
             org.opencontainers.image.revision=${{ steps.build_meta.outputs.source_commit }}
             org.opencontainers.image.source=https://github.com/${{ env.SOURCE_OWNER }}/${{ matrix.component.repo }}
 
-      - name: Delete Docker cache
-        uses: useblacksmith/stickydisk-delete@v1
-        with:
-          delete-docker-cache: true
-
   publish-manifest:
     name: Publish manifest (${{ matrix.component.service }})
     needs: publish
@@ -239,9 +234,7 @@ jobs:
           - service: worker
 
     steps:
-      - uses: useblacksmith/setup-docker-builder@v1
-        with:
-          max-cache-size-mb: "5120"
+      - uses: docker/setup-buildx-action@v4
 
       - name: Login to GHCR
         uses: docker/login-action@v4
