@@ -41,7 +41,15 @@ Image names:
 
 Current default source tags are pinned in `source-versions.env`.
 
-For a stable `vX.Y.Z` tag, the workflow also publishes `latest`.
+Build runners:
+
+- `linux/amd64` builds run on `blacksmith-16vcpu-ubuntu-2404`.
+- `linux/arm64` builds run on `blacksmith-16vcpu-ubuntu-2404-arm`.
+
+Each architecture build pushes an architecture-specific tag such as
+`<version>-amd64` or `<version>-arm64`. When publishing is enabled, the
+workflow then creates the multi-architecture `<version>` manifest and, for
+stable release tags, the `latest` manifest.
 
 Manual dry-run:
 

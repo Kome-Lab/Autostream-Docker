@@ -58,12 +58,12 @@ env:
 
 jobs:
   publish:
-    name: Build image (${{ matrix.service }})
-    runs-on: ubuntu-latest
+    name: Build image (${{ matrix.component.service }} ${{ matrix.target.arch }})
+    runs-on: ${{ matrix.target.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
+        component:
           - service: control-panel
             repo: Autostream-ControlPanel
             dockerfile: services/control-panel/Dockerfile
@@ -79,6 +79,13 @@ jobs:
           - service: worker
             repo: Autostream-Worker
             dockerfile: services/worker/Dockerfile
+        target:
+          - platform: linux/amd64
+            arch: amd64
+            runner: blacksmith-16vcpu-ubuntu-2404
+          - platform: linux/arm64
+            arch: arm64
+            runner: blacksmith-16vcpu-ubuntu-2404-arm
 
     steps:
       - name: Validate version
@@ -105,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           source_version=""
-          case "${{ matrix.service }}" in
+          case "${{ matrix.component.service }}" in
             control-panel) source_version="${{ inputs.control_panel_version }}" ;;
             discord-bot) source_version="${{ inputs.discord_bot_version }}" ;;
             encoder-recorder) source_version="${{ inputs.encoder_recorder_version }}" ;;
@@ -115,7 +122,7 @@ jobs:
           if [[ -z "${source_version}" && -f dockerfiles/source-versions.env ]]; then
             # shellcheck disable=SC1091
             source dockerfiles/source-versions.env
-            case "${{ matrix.service }}" in
+            case "${{ matrix.component.service }}" in
               control-panel) source_version="${CONTROL_PANEL_SOURCE_VERSION:-}" ;;
               discord-bot) source_version="${DISCORD_BOT_SOURCE_VERSION:-}" ;;
               encoder-recorder) source_version="${ENCODER_RECORDER_SOURCE_VERSION:-}" ;;
@@ -135,7 +142,7 @@ jobs:
             exit 1
           fi
           echo "source_version=${source_version}" >> "${GITHUB_OUTPUT}"
-          echo "Using ${{ matrix.repo }} source tag ${source_version} for image ${VERSION}."
+          echo "Using ${{ matrix.component.repo }} source tag ${source_version} for image ${VERSION} on ${{ matrix.target.platform }}."
 
       - name: Verify source access
         shell: bash
@@ -143,21 +150,21 @@ jobs:
           GH_TOKEN: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
         run: |
           set -euo pipefail
-          if ! gh api "repos/${SOURCE_OWNER}/${{ matrix.repo }}" >/dev/null; then
-            echo "::error::Cannot access ${SOURCE_OWNER}/${{ matrix.repo }}. Set AUTOSTREAM_SOURCE_TOKEN or GITHUBTOKEN with read access to the private source repositories." >&2
+          if ! gh api "repos/${SOURCE_OWNER}/${{ matrix.component.repo }}" >/dev/null; then
+            echo "::error::Cannot access ${SOURCE_OWNER}/${{ matrix.component.repo }}. Set AUTOSTREAM_SOURCE_TOKEN or GITHUBTOKEN with read access to the private source repositories." >&2
             exit 1
           fi
-          if ! gh api "repos/${SOURCE_OWNER}/${{ matrix.repo }}/git/ref/tags/${{ steps.source_version.outputs.source_version }}" >/dev/null; then
-            echo "::error::Missing source tag ${{ steps.source_version.outputs.source_version }} in ${SOURCE_OWNER}/${{ matrix.repo }}. If service versions differ, set the matching *_version workflow input or update source-versions.env." >&2
+          if ! gh api "repos/${SOURCE_OWNER}/${{ matrix.component.repo }}/git/ref/tags/${{ steps.source_version.outputs.source_version }}" >/dev/null; then
+            echo "::error::Missing source tag ${{ steps.source_version.outputs.source_version }} in ${SOURCE_OWNER}/${{ matrix.component.repo }}. If service versions differ, set the matching *_version workflow input or update source-versions.env." >&2
             exit 1
           fi
 
       - name: Checkout source
         uses: actions/checkout@v7
         with:
-          repository: ${{ env.SOURCE_OWNER }}/${{ matrix.repo }}
+          repository: ${{ env.SOURCE_OWNER }}/${{ matrix.component.repo }}
           ref: ${{ steps.source_version.outputs.source_version }}
-          path: source/${{ matrix.repo }}
+          path: source/${{ matrix.component.repo }}
           token: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
 
       - name: Resolve build metadata
@@ -165,12 +172,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "source_commit=$(git -C "source/${{ matrix.repo }}" rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          echo "source_commit=$(git -C "source/${{ matrix.component.repo }}" rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
-      - uses: docker/setup-qemu-action@v4
-
-      - uses: docker/setup-buildx-action@v4
+      - uses: useblacksmith/setup-docker-builder@v1
+        with:
+          max-cache-size-mb: "0"
 
       - name: Login to GHCR
         if: env.PUSH_IMAGES == 'true'
@@ -186,22 +193,19 @@ jobs:
         run: |
           set -euo pipefail
           image_namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
-          image="${REGISTRY}/${image_namespace}/${{ matrix.service }}"
+          image="${REGISTRY}/${image_namespace}/${{ matrix.component.service }}"
           {
             echo "tags<<EOF"
-            echo "${image}:${VERSION}"
-            if [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "${image}:latest"
-            fi
+            echo "${image}:${VERSION}-${{ matrix.target.arch }}"
             echo "EOF"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Build and optionally push
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
-          context: source/${{ matrix.repo }}
-          file: dockerfiles/${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
+          context: source/${{ matrix.component.repo }}
+          file: dockerfiles/${{ matrix.component.dockerfile }}
+          platforms: ${{ matrix.target.platform }}
           push: ${{ env.PUSH_IMAGES == 'true' }}
           tags: ${{ steps.image_tags.outputs.tags }}
           build-args: |
@@ -209,7 +213,76 @@ jobs:
             COMMIT=${{ steps.build_meta.outputs.source_commit }}
             BUILD_DATE=${{ steps.build_meta.outputs.build_date }}
           labels: |
-            org.opencontainers.image.title=AutoStream ${{ matrix.service }}
+            org.opencontainers.image.title=AutoStream ${{ matrix.component.service }}
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ steps.build_meta.outputs.source_commit }}
-            org.opencontainers.image.source=https://github.com/${{ env.SOURCE_OWNER }}/${{ matrix.repo }}
+            org.opencontainers.image.source=https://github.com/${{ env.SOURCE_OWNER }}/${{ matrix.component.repo }}
+
+      - name: Delete Docker cache
+        uses: useblacksmith/stickydisk-delete@v1
+        with:
+          delete-docker-cache: true
+
+  publish-manifest:
+    name: Publish manifest (${{ matrix.component.service }})
+    needs: publish
+    if: ${{ github.ref_type == 'tag' || inputs.push_images }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - service: control-panel
+          - service: discord-bot
+          - service: encoder-recorder
+          - service: observability
+          - service: worker
+
+    steps:
+      - uses: useblacksmith/setup-docker-builder@v1
+        with:
+          max-cache-size-mb: "0"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUBTOKEN || github.token }}
+
+      - name: Compute image ref
+        id: image_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${REGISTRY}/${image_namespace}/${{ matrix.component.service }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish version manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.image_ref.outputs.image }}"
+          docker buildx imagetools create \
+            -t "${image}:${VERSION}" \
+            "${image}:${VERSION}-amd64" \
+            "${image}:${VERSION}-arm64"
+
+      - name: Publish latest manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            image="${{ steps.image_ref.outputs.image }}"
+            docker buildx imagetools create \
+              -t "${image}:latest" \
+              "${image}:${VERSION}-amd64" \
+              "${image}:${VERSION}-arm64"
+          else
+            echo "Skipping latest for non-stable version ${VERSION}."
+          fi
+
+      - name: Delete Docker cache
+        uses: useblacksmith/stickydisk-delete@v1
+        with:
+          delete-docker-cache: true
