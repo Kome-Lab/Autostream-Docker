@@ -241,7 +241,7 @@ jobs:
     steps:
       - uses: useblacksmith/setup-docker-builder@v1
         with:
-          max-cache-size-mb: "0"
+          max-cache-size-mb: "5120"
 
       - name: Login to GHCR
         uses: docker/login-action@v4
