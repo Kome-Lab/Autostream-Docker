@@ -281,8 +281,3 @@ jobs:
           else
             echo "Skipping latest for non-stable version ${VERSION}."
           fi
-
-      - name: Delete Docker cache
-        uses: useblacksmith/stickydisk-delete@v1
-        with:
-          delete-docker-cache: true
