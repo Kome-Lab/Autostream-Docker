@@ -39,32 +39,34 @@ Image names:
 - `ghcr.io/<owner>/autostream-docker/observability:<version>`
 - `ghcr.io/<owner>/autostream-docker/worker:<version>`
 
+Current default source tags are pinned in `source-versions.env`.
+
 For a stable `vX.Y.Z` tag, the workflow also publishes `latest`.
 
 Manual dry-run:
 
 ```bash
-gh workflow run publish-ghcr.yml -f version=v1.2.3 -f source_owner=<owner> -f push_images=false
+gh workflow run publish-ghcr.yml -f version=v1.3.0 -f source_owner=<owner> -f push_images=false
 ```
 
 Manual dry-run with mixed service source versions:
 
 ```bash
 gh workflow run publish-ghcr.yml \
-  -f version=v1.2.3 \
+  -f version=v1.3.0 \
   -f source_owner=<owner> \
-  -f control_panel_version=v1.2.3 \
-  -f discord_bot_version=v1.0.1 \
-  -f encoder_recorder_version=v1.0.1 \
-  -f observability_version=v1.0.1 \
-  -f worker_version=v1.0.1 \
+  -f control_panel_version=v1.3.0 \
+  -f discord_bot_version=v1.0.8 \
+  -f encoder_recorder_version=v1.0.8 \
+  -f observability_version=v1.0.10 \
+  -f worker_version=v1.0.8 \
   -f push_images=false
 ```
 
 Manual publish:
 
 ```bash
-gh workflow run publish-ghcr.yml -f version=v1.2.3 -f source_owner=<owner> -f push_images=true
+gh workflow run publish-ghcr.yml -f version=v1.3.0 -f source_owner=<owner> -f push_images=true
 ```
 
 If the source repositories are private, set one of these repository secrets in `Autostream-Docker`:

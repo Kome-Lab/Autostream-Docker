@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Source release tag, for example v1.2.3"
+        description: "Docker image tag, for example v1.3.0"
         required: true
         type: string
       source_owner:
@@ -86,11 +86,11 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${VERSION}" =~ ^v\. ]]; then
-            echo "::error::Version must look like v1.2.3, not ${VERSION}. Remove the dot after v." >&2
+            echo "::error::Version must look like v1.3.0, not ${VERSION}. Remove the dot after v." >&2
             exit 1
           fi
           if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Version must look like v1.2.3; got ${VERSION}" >&2
+            echo "Version must look like v1.3.0; got ${VERSION}" >&2
             exit 1
           fi
 
@@ -127,11 +127,11 @@ jobs:
             source_version="${VERSION}"
           fi
           if [[ "${source_version}" =~ ^v\. ]]; then
-            echo "::error::Source version must look like v1.2.3, not ${source_version}. Remove the dot after v." >&2
+            echo "::error::Source version must look like v1.3.0, not ${source_version}. Remove the dot after v." >&2
             exit 1
           fi
           if [[ ! "${source_version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Source version must look like v1.2.3; got ${source_version}" >&2
+            echo "::error::Source version must look like v1.3.0; got ${source_version}" >&2
             exit 1
           fi
           echo "source_version=${source_version}" >> "${GITHUB_OUTPUT}"
