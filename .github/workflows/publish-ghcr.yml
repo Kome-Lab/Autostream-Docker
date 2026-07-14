@@ -102,7 +102,7 @@ jobs:
           fi
 
       - name: Checkout Dockerfiles
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           path: dockerfiles
 
@@ -160,7 +160,7 @@ jobs:
           fi
 
       - name: Checkout source
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           repository: ${{ env.SOURCE_OWNER }}/${{ matrix.component.repo }}
           ref: ${{ steps.source_version.outputs.source_version }}
@@ -175,13 +175,13 @@ jobs:
           echo "source_commit=$(git -C "source/${{ matrix.component.repo }}" rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
-      - uses: useblacksmith/setup-docker-builder@v1
+      - uses: useblacksmith/setup-docker-builder@47a5d0102cc44712a17a633c2599f755008cc40e # v1
         with:
           max-cache-size-mb: "10240"
 
       - name: Login to GHCR
         if: env.PUSH_IMAGES == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -201,7 +201,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Build and optionally push
-        uses: useblacksmith/build-push-action@v2
+        uses: useblacksmith/build-push-action@fb9e3e6a9299c78462bfadd0d93352c316adc9b8 # v2
         with:
           context: source/${{ matrix.component.repo }}
           file: dockerfiles/${{ matrix.component.dockerfile }}
@@ -234,10 +234,10 @@ jobs:
           - service: worker
 
     steps:
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}

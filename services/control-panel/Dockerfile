@@ -11,7 +11,7 @@ RUN cd web && npm run build \
        elif [ -d dist ]; then cp -a dist /tmp/autostream-control-panel-web; \
        else echo "control-panel web build did not produce web/out or web/dist" >&2; exit 1; fi
 
-FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.5-trixie AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
