@@ -47,7 +47,10 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: autostream-docker-${{ github.ref_type == 'tag' && github.ref_name || inputs.version }}
+  cancel-in-progress: false
 
 env:
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version }}
@@ -57,8 +60,86 @@ env:
   IMAGE_NAMESPACE: ${{ github.repository_owner }}/Autostream-Docker
 
 jobs:
+  release-preflight:
+    name: Refuse mutable release targets
+    permissions:
+      contents: read
+      packages: read
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Validate immutable version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version must look like v1.3.0; got ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Refuse an existing GitHub Release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${VERSION}")"
+          case "${status}" in
+            404) ;;
+            200)
+              echo "::error::GitHub Release ${VERSION} already exists; immutable releases are never modified." >&2
+              exit 1
+              ;;
+            *)
+              echo "::error::Could not prove that GitHub Release ${VERSION} is absent (HTTP ${status})." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Login to GHCR for immutable tag checks
+        if: env.PUSH_IMAGES == 'true'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUBTOKEN || github.token }}
+
+      - name: Refuse existing GHCR tags
+        if: env.PUSH_IMAGES == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          for service in control-panel discord-bot encoder-recorder observability worker; do
+            for suffix in '' '-amd64' '-arm64'; do
+              ref="${REGISTRY}/${namespace}/${service}:${VERSION}${suffix}"
+              set +e
+              output="$(docker manifest inspect "${ref}" 2>&1)"
+              inspect_status=$?
+              set -e
+              if [[ "${inspect_status}" -eq 0 ]]; then
+                echo "::error::GHCR tag ${ref} already exists; immutable image tags are never overwritten." >&2
+                exit 1
+              fi
+              if ! grep -Eqi 'manifest unknown|no such manifest|not found' <<<"${output}"; then
+                echo "::error::Could not prove that GHCR tag ${ref} is absent." >&2
+                echo "${output}" >&2
+                exit 1
+              fi
+            done
+          done
+
   publish:
     name: Build image (${{ matrix.component.service }} ${{ matrix.target.arch }})
+    needs: release-preflight
+    permissions:
+      contents: read
+      packages: write
     runs-on: ${{ matrix.target.runner }}
     strategy:
       fail-fast: false
@@ -109,15 +190,21 @@ jobs:
       - name: Resolve source version
         id: source_version
         shell: bash
+        env:
+          CONTROL_PANEL_INPUT: ${{ inputs.control_panel_version }}
+          DISCORD_BOT_INPUT: ${{ inputs.discord_bot_version }}
+          ENCODER_RECORDER_INPUT: ${{ inputs.encoder_recorder_version }}
+          OBSERVABILITY_INPUT: ${{ inputs.observability_version }}
+          WORKER_INPUT: ${{ inputs.worker_version }}
         run: |
           set -euo pipefail
           source_version=""
           case "${{ matrix.component.service }}" in
-            control-panel) source_version="${{ inputs.control_panel_version }}" ;;
-            discord-bot) source_version="${{ inputs.discord_bot_version }}" ;;
-            encoder-recorder) source_version="${{ inputs.encoder_recorder_version }}" ;;
-            observability) source_version="${{ inputs.observability_version }}" ;;
-            worker) source_version="${{ inputs.worker_version }}" ;;
+            control-panel) source_version="${CONTROL_PANEL_INPUT}" ;;
+            discord-bot) source_version="${DISCORD_BOT_INPUT}" ;;
+            encoder-recorder) source_version="${ENCODER_RECORDER_INPUT}" ;;
+            observability) source_version="${OBSERVABILITY_INPUT}" ;;
+            worker) source_version="${WORKER_INPUT}" ;;
           esac
           if [[ -z "${source_version}" && -f dockerfiles/source-versions.env ]]; then
             # shellcheck disable=SC1091
@@ -192,21 +279,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image_namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
-          image="${REGISTRY}/${image_namespace}/${{ matrix.component.service }}"
+          namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          image="${REGISTRY}/${namespace}/${{ matrix.component.service }}"
           {
+            echo "image=${image}"
             echo "tags<<EOF"
             echo "${image}:${VERSION}-${{ matrix.target.arch }}"
             echo "EOF"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Build and optionally push
+        id: build
         uses: useblacksmith/build-push-action@fb9e3e6a9299c78462bfadd0d93352c316adc9b8 # v2
         with:
           context: source/${{ matrix.component.repo }}
           file: dockerfiles/${{ matrix.component.dockerfile }}
           platforms: ${{ matrix.target.platform }}
           push: ${{ env.PUSH_IMAGES == 'true' }}
+          provenance: false
           tags: ${{ steps.image_tags.outputs.tags }}
           build-args: |
             VERSION=${{ steps.source_version.outputs.source_version }}
@@ -218,10 +308,45 @@ jobs:
             org.opencontainers.image.revision=${{ steps.build_meta.outputs.source_commit }}
             org.opencontainers.image.source=https://github.com/${{ env.SOURCE_OWNER }}/${{ matrix.component.repo }}
 
+      - name: Record platform digest
+        if: env.PUSH_IMAGES == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest='${{ steps.build.outputs.digest }}'
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build did not return an immutable sha256 digest: ${digest}" >&2
+            exit 1
+          fi
+          mkdir -p release-metadata
+          jq -n \
+            --arg service '${{ matrix.component.service }}' \
+            --arg source_version '${{ steps.source_version.outputs.source_version }}' \
+            --arg image '${{ steps.image_tags.outputs.image }}' \
+            --arg platform '${{ matrix.target.platform }}' \
+            --arg digest "${digest}" \
+            '{service: $service, source_version: $source_version, image: $image, platform: $platform, digest: $digest}' \
+            > 'release-metadata/${{ matrix.component.service }}-${{ matrix.target.arch }}.json'
+
+      - name: Upload platform digest metadata
+        if: env.PUSH_IMAGES == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-metadata-${{ matrix.component.service }}-${{ matrix.target.arch }}
+          path: release-metadata/${{ matrix.component.service }}-${{ matrix.target.arch }}.json
+          if-no-files-found: error
+          retention-days: 7
+
   publish-manifest:
     name: Publish manifest (${{ matrix.component.service }})
     needs: publish
     if: ${{ github.ref_type == 'tag' || inputs.push_images }}
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
     runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       fail-fast: false
@@ -248,8 +373,49 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image_namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
-          echo "image=${REGISTRY}/${image_namespace}/${{ matrix.component.service }}" >> "${GITHUB_OUTPUT}"
+          namespace="$(printf '%s' "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${REGISTRY}/${namespace}/${{ matrix.component.service }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download platform digest metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: image-metadata-${{ matrix.component.service }}-*
+          path: image-metadata
+          merge-multiple: true
+
+      - name: Validate platform digest metadata
+        id: platform_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          metadata_files=(image-metadata/*.json)
+          if [[ "${#metadata_files[@]}" -ne 2 ]]; then
+            echo "::error::Expected two platform metadata files for ${{ matrix.component.service }}, found ${#metadata_files[@]}." >&2
+            exit 1
+          fi
+
+          metadata="$(jq -s '.' "${metadata_files[@]}")"
+          service='${{ matrix.component.service }}'
+          image='${{ steps.image_ref.outputs.image }}'
+          jq -e --arg service "${service}" --arg image "${image}" \
+            'length == 2 and all(.[]; .service == $service and .image == $image)' \
+            <<<"${metadata}" >/dev/null
+
+          source_version="$(jq -er 'map(.source_version) | unique | if length == 1 then .[0] else error("source versions differ between platforms") end' <<<"${metadata}")"
+          amd64_digest="$(jq -er '[.[] | select(.platform == "linux/amd64")] | if length == 1 then .[0].digest else error("missing or duplicate linux/amd64 metadata") end' <<<"${metadata}")"
+          arm64_digest="$(jq -er '[.[] | select(.platform == "linux/arm64")] | if length == 1 then .[0].digest else error("missing or duplicate linux/arm64 metadata") end' <<<"${metadata}")"
+          for digest in "${amd64_digest}" "${arm64_digest}"; do
+            if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Invalid platform digest: ${digest}" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "source_version=${source_version}"
+            echo "amd64_digest=${amd64_digest}"
+            echo "arm64_digest=${arm64_digest}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Publish version manifest
         shell: bash
@@ -258,8 +424,39 @@ jobs:
           image="${{ steps.image_ref.outputs.image }}"
           docker buildx imagetools create \
             -t "${image}:${VERSION}" \
-            "${image}:${VERSION}-amd64" \
-            "${image}:${VERSION}-arm64"
+            "${image}@${{ steps.platform_meta.outputs.amd64_digest }}" \
+            "${image}@${{ steps.platform_meta.outputs.arm64_digest }}"
+
+      - name: Verify published manifest and write component metadata
+        id: manifest_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='${{ steps.image_ref.outputs.image }}'
+          mkdir -p release-component
+          docker buildx imagetools inspect "${image}:${VERSION}" --format '{{json .Manifest}}' > published-manifest.json
+          manifest_digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' published-manifest.json)"
+          amd64_digest="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | if length == 1 then .[0].digest else error("published manifest must contain one linux/amd64 image") end' published-manifest.json)"
+          arm64_digest="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | if length == 1 then .[0].digest else error("published manifest must contain one linux/arm64 image") end' published-manifest.json)"
+          if [[ "${amd64_digest}" != '${{ steps.platform_meta.outputs.amd64_digest }}' ]]; then
+            echo "::error::Published linux/amd64 digest does not match the build output." >&2
+            exit 1
+          fi
+          if [[ "${arm64_digest}" != '${{ steps.platform_meta.outputs.arm64_digest }}' ]]; then
+            echo "::error::Published linux/arm64 digest does not match the build output." >&2
+            exit 1
+          fi
+
+          jq -n \
+            --arg service '${{ matrix.component.service }}' \
+            --arg source_version '${{ steps.platform_meta.outputs.source_version }}' \
+            --arg image "${image}:${VERSION}" \
+            --arg manifest_digest "${manifest_digest}" \
+            --arg amd64_digest "${amd64_digest}" \
+            --arg arm64_digest "${arm64_digest}" \
+            '{service: $service, source_version: $source_version, image: $image, manifest_digest: $manifest_digest, platform_digests: {"linux/amd64": $amd64_digest, "linux/arm64": $arm64_digest}, rollback_compatible: true, database_schema: (if ($service == "control-panel" or $service == "observability") then "backward_compatible" else "none" end)}' \
+            > 'release-component/${{ matrix.component.service }}.json'
+          echo "manifest_digest=${manifest_digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish latest manifest
         shell: bash
@@ -269,8 +466,121 @@ jobs:
             image="${{ steps.image_ref.outputs.image }}"
             docker buildx imagetools create \
               -t "${image}:latest" \
-              "${image}:${VERSION}-amd64" \
-              "${image}:${VERSION}-arm64"
+              "${image}:${VERSION}"
           else
             echo "Skipping latest for non-stable version ${VERSION}."
           fi
+
+      - name: Attest multi-platform image provenance
+        id: image_attestation
+        continue-on-error: true
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ steps.image_ref.outputs.image }}
+          subject-digest: ${{ steps.manifest_meta.outputs.manifest_digest }}
+          subject-version: ${{ env.VERSION }}
+          push-to-registry: true
+
+      - name: Report unavailable image attestation
+        if: steps.image_attestation.outcome == 'failure'
+        shell: bash
+        run: echo '::warning::GitHub artifact attestations are unavailable for this repository or plan; the immutable release manifest will still be published.'
+
+      - name: Upload component release metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-component-${{ matrix.component.service }}
+          path: release-component/${{ matrix.component.service }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  release-manifest:
+    name: Publish immutable release manifest
+    needs: publish-manifest
+    if: github.ref_type == 'tag'
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout release manifest generator
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Download component release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-component-*
+          path: release-components
+          merge-multiple: true
+
+      - name: Generate release-manifest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python3 scripts/generate-release-manifest.py \
+            --bundle-version "${VERSION}" \
+            --generated-at "${generated_at}" \
+            --input-dir release-components \
+            --output release-manifest.json \
+            --checksum-output release-manifest.json.sha256
+          jq -e \
+            --arg version "${VERSION}" \
+            --arg generated_at "${generated_at}" \
+            '(.schema_version == 1) and
+             (.channel == "docker") and
+             (.release_id == $version) and
+             (.bundle_version == $version) and
+             (.published_at == $generated_at) and
+             (.generated_at == $generated_at) and
+             (.minimum_agent_version == "v1.7.0") and
+             (.components | length == 5) and
+             (all(.components[]; .rollback_compatible == true)) and
+             (all(.components[];
+               if (.service == "control-panel" or .service == "observability")
+               then .database_schema == "backward_compatible"
+               else .database_schema == "none"
+               end))' \
+            release-manifest.json > /dev/null
+          sha256sum --check release-manifest.json.sha256
+
+      - name: Upload release manifest workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-manifest-${{ env.VERSION }}
+          path: |
+            release-manifest.json
+            release-manifest.json.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attest release manifest provenance
+        id: release_attestation
+        continue-on-error: true
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: release-manifest.json
+          subject-version: ${{ env.VERSION }}
+
+      - name: Report unavailable release manifest attestation
+        if: steps.release_attestation.outcome == 'failure'
+        shell: bash
+        run: echo '::warning::GitHub artifact attestations are unavailable for this repository or plan; the release manifest remains bound to immutable image digests.'
+
+      - name: Create GitHub Release and attach release manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_flags=(--verify-tag --generate-notes --title "AutoStream Docker ${VERSION}")
+          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "${VERSION}" \
+            'release-manifest.json#AutoStream immutable release manifest' \
+            'release-manifest.json.sha256#SHA-256 checksum for the immutable release manifest' \
+            "${release_flags[@]}"

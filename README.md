@@ -43,17 +43,116 @@ Current default source tags are pinned in `source-versions.env`.
 
 Build runners:
 
-- `linux/amd64` builds run on `blacksmith-16vcpu-ubuntu-2404`.
-- `linux/arm64` builds run on `blacksmith-16vcpu-ubuntu-2404-arm`.
+- `linux/amd64` builds run on the GitHub-hosted `ubuntu-24.04` runner.
+- `linux/arm64` builds run on the GitHub-hosted `ubuntu-24.04-arm` runner.
 
 Each architecture build pushes an architecture-specific tag such as
 `<version>-amd64` or `<version>-arm64`. When publishing is enabled, the
 workflow then creates the multi-architecture `<version>` manifest and, for
 stable release tags, the `latest` manifest.
 
-Docker layer cache is bounded with `max-cache-size-mb`. The publish workflow
-does not delete Blacksmith sticky disks after each build; cache cleanup should
-be handled separately when it is actually needed.
+The multi-architecture manifest is assembled from the immutable digest returned
+by each architecture build, not by resolving the architecture tags again. The
+workflow inspects the published manifest and fails if its `linux/amd64` or
+`linux/arm64` child digest differs from the corresponding build result.
+
+## Release Manifest Contract
+
+A successful pushed tag publish creates a GitHub Release for that new tag and
+attaches `release-manifest.json` plus the updater-required
+`release-manifest.json.sha256` sidecar. The sidecar uses the standard
+`<64 lowercase hex>  release-manifest.json` format. Stable releases become the repository's
+`releases/latest`; prerelease versions such as `v1.3.0-rc.1` are created as
+GitHub prereleases. An existing manifest or checksum asset is never
+overwritten. This makes the release assets suitable for Control Panel update
+discovery: a Docker bundle is updateable only when the latest release contains
+this asset and all five required components validate.
+
+The release manifest has this versioned JSON contract:
+
+```json
+{
+  "schema_version": 1,
+  "release_id": "v1.3.0",
+  "channel": "docker",
+  "published_at": "2026-07-18T07:08:09Z",
+  "bundle_version": "v1.3.0",
+  "generated_at": "2026-07-18T07:08:09Z",
+  "minimum_agent_version": "v1.7.0",
+  "components": [
+    {
+      "service": "control-panel",
+      "source_version": "v1.6.8",
+      "image": "ghcr.io/kome-lab/autostream-docker/control-panel:v1.3.0",
+      "manifest_digest": "sha256:<64 lowercase hex characters>",
+      "platform_digests": {
+        "linux/amd64": "sha256:<64 lowercase hex characters>",
+        "linux/arm64": "sha256:<64 lowercase hex characters>"
+      },
+      "rollback_compatible": true,
+      "database_schema": "backward_compatible"
+    }
+  ]
+}
+```
+
+`release_id`, `channel`, and `published_at` are the shared AutoStream release
+envelope. For this repository, `channel` is always `docker`.
+`bundle_version` and `generated_at` are compatibility aliases and must equal
+`release_id` and `published_at`, respectively.
+`minimum_agent_version` is required and is fixed at `v1.7.0`, the first release
+that implements the central-only ConfigSHA/grant protocol. Consumers must reject
+a bundle when the installed updater is older than this version. Do not raise the
+floor for every bundle release; change it only when the updater protocol itself
+requires a newer implementation.
+
+`components` always contains exactly `control-panel`, `discord-bot`,
+`encoder-recorder`, `observability`, and `worker`, in that order. `image` is the
+canonical `ghcr.io/kome-lab/autostream-docker/<service>:<bundle_version>` ref,
+while `manifest_digest` and `platform_digests` are immutable
+registry identities. Consumers must verify `release-manifest.json.sha256`
+before parsing the JSON and should deploy by
+`<image repository>@<manifest_digest>` and treat the tag as display metadata.
+They must reject unknown schema versions, missing or duplicate services,
+malformed digests, image tags that do not match `bundle_version`, and missing or
+unsafe rollback policy fields. Every component declares
+`rollback_compatible: true`. `control-panel` and `observability` declare
+`database_schema: backward_compatible`; `discord-bot`, `encoder-recorder`, and
+`worker` declare `database_schema: none`. This contract must be validated before
+an updater pulls an image or runs `docker compose up`, because a failed update
+may automatically restore the prior image after a database migration.
+
+The build matrix cannot expose a reliable combined output directly. Each build
+therefore uploads one uniquely named digest metadata artifact. Per-service jobs
+download and validate the two platform artifacts, publish one multi-arch image,
+and upload one component artifact. The final job downloads all five component
+artifacts and runs `scripts/generate-release-manifest.py`, which enforces the
+contract before creating the GitHub Release.
+
+When GitHub artifact attestations are available for the repository plan, the
+workflow publishes provenance for each multi-arch image and for
+`release-manifest.json`. Attestation failure is reported as a workflow warning
+because private-repository availability depends on the GitHub plan; digest and
+release publication still complete. All official GitHub Actions used for
+artifact transfer and attestation are pinned to full commit SHAs.
+
+Operators can download and inspect a release manifest with:
+
+```bash
+gh release download v1.3.0 --pattern 'release-manifest.json*'
+sha256sum --check release-manifest.json.sha256
+jq . release-manifest.json
+```
+
+Where attestations are available, verify the downloaded asset with:
+
+```bash
+gh attestation verify release-manifest.json --repo <owner>/Autostream-Docker
+```
+
+GitHub-hosted runners are ephemeral. The publish workflow does not configure a
+provider-specific persistent Docker layer cache, so cache state is not retained
+between jobs.
 
 Manual dry-run:
 
@@ -75,7 +174,8 @@ gh workflow run publish-ghcr.yml \
   -f push_images=false
 ```
 
-Manual publish:
+Manual registry publish (does not create a GitHub Release; use a pushed tag for
+a Control Panel-discoverable bundle):
 
 ```bash
 gh workflow run publish-ghcr.yml -f version=v1.3.0 -f source_owner=<owner> -f push_images=true
