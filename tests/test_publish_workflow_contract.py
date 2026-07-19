@@ -12,6 +12,30 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "publish-ghcr.yml").read_text(
 
 
 class PublishWorkflowContractTests(unittest.TestCase):
+    def test_workflow_uses_only_standard_docker_build_infrastructure(self) -> None:
+        runner_labels = set(
+            re.findall(r"^\s+(?:runs-on|runner): (.+)$", WORKFLOW, re.MULTILINE)
+        )
+        self.assertEqual(
+            {"ubuntu-24.04", "ubuntu-24.04-arm", "${{ matrix.target.runner }}"},
+            runner_labels,
+        )
+        docker_build_actions = re.findall(
+            r"uses: (docker/(?:setup-buildx|build-push)-action)@([^\s]+)",
+            WORKFLOW,
+        )
+        self.assertGreaterEqual(len(docker_build_actions), 3)
+        self.assertEqual(
+            {"docker/setup-buildx-action", "docker/build-push-action"},
+            {action for action, _ in docker_build_actions},
+        )
+        for action, ref in docker_build_actions:
+            self.assertRegex(ref, r"^[0-9a-f]{40}$", action)
+        self.assertNotRegex(
+            WORKFLOW,
+            r"uses: (?!docker/)[^\s]*/(?:setup-docker-builder|build-push-action)@",
+        )
+
     def test_official_artifact_actions_are_pinned_to_full_shas(self) -> None:
         official_uses = re.findall(
             r"uses: (actions/(?:upload-artifact|download-artifact|attest-build-provenance))@([^\s]+)",
