@@ -470,6 +470,36 @@ jobs:
             echo "Skipping latest for non-stable version ${VERSION}."
           fi
 
+      - name: Verify latest manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Skipping latest verification for non-stable version ${VERSION}."
+            exit 0
+          fi
+
+          image="${{ steps.image_ref.outputs.image }}"
+          expected_digest='${{ steps.manifest_meta.outputs.manifest_digest }}'
+          latest_digest=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if latest_manifest="$(timeout 15s docker buildx imagetools inspect "${image}:latest" --format '{{json .Manifest}}' 2>&1)"; then
+              latest_digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"${latest_manifest}" 2>/dev/null || true)"
+              if [[ "${latest_digest}" == "${expected_digest}" ]]; then
+                echo "Verified ${image}:latest at ${latest_digest}."
+                exit 0
+              fi
+            fi
+
+            if (( attempt < 10 )); then
+              echo "Waiting for ${image}:latest to converge (${attempt}/10); observed ${latest_digest:-unavailable}."
+              sleep 3
+            fi
+          done
+
+          echo "::error::${image}:latest digest ${latest_digest:-unavailable} does not match the immutable version manifest ${expected_digest}." >&2
+          exit 1
+
       - name: Attest multi-platform image provenance
         id: image_attestation
         continue-on-error: true

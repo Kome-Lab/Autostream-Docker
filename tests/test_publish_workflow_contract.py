@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github" / "workflows" / "publish-ghcr.yml").read_text(
     encoding="utf-8"
 )
+README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 class PublishWorkflowContractTests(unittest.TestCase):
@@ -75,6 +76,31 @@ class PublishWorkflowContractTests(unittest.TestCase):
         self.assertGreaterEqual(WORKFLOW.count("release-manifest.json.sha256"), 4)
         self.assertNotIn('gh release upload "${VERSION}"', WORKFLOW)
         self.assertNotIn("gh release upload --clobber", WORKFLOW)
+
+    def test_stable_latest_manifest_is_verified_against_version_digest(self) -> None:
+        self.assertIn("- name: Verify latest manifest", WORKFLOW)
+        verify_step = WORKFLOW.split("- name: Verify latest manifest", 1)[1].split(
+            "- name:", 1
+        )[0]
+        self.assertIn(
+            'if [[ ! "${VERSION}" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]',
+            verify_step,
+        )
+        self.assertIn("Skipping latest verification for non-stable version", verify_step)
+        self.assertIn('"${image}:latest"', verify_step)
+        self.assertIn("steps.manifest_meta.outputs.manifest_digest", verify_step)
+        self.assertIn("for attempt in 1 2 3 4 5 6 7 8 9 10", verify_step)
+        self.assertIn("timeout 15s docker buildx imagetools inspect", verify_step)
+        self.assertIn(
+            'if [[ "${latest_digest}" == "${expected_digest}" ]]', verify_step
+        )
+        self.assertIn("does not match the immutable version manifest", verify_step)
+        self.assertTrue(verify_step.rstrip().endswith("exit 1"))
+
+    def test_manual_registry_publish_is_not_documented_as_an_official_release(self) -> None:
+        self.assertIn("Manual registry publish is diagnostic-only", README)
+        self.assertIn("never use this path for the\nofficial release version", README)
+        self.assertIn("a later tag workflow cannot reuse it", README)
 
     def test_manifest_sidecar_is_generated_verified_and_uploaded_together(self) -> None:
         self.assertIn("--checksum-output release-manifest.json.sha256", WORKFLOW)

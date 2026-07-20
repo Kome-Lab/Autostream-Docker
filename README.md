@@ -54,7 +54,9 @@ stable release tags, the `latest` manifest.
 The multi-architecture manifest is assembled from the immutable digest returned
 by each architecture build, not by resolving the architecture tags again. The
 workflow inspects the published manifest and fails if its `linux/amd64` or
-`linux/arm64` child digest differs from the corresponding build result.
+`linux/arm64` child digest differs from the corresponding build result. For a
+stable release it also waits for `latest` to resolve and fails unless its digest
+matches the immutable `<version>` manifest digest.
 
 ## Release Manifest Contract
 
@@ -174,8 +176,11 @@ gh workflow run publish-ghcr.yml \
   -f push_images=false
 ```
 
-Manual registry publish (does not create a GitHub Release; use a pushed tag for
-a Control Panel-discoverable bundle):
+Manual registry publish is diagnostic-only. It does not create a GitHub Release,
+so use a pushed tag for a Control Panel-discoverable bundle. Because GHCR tags
+are immutable in this workflow, a successful manual publish consumes that
+version and a later tag workflow cannot reuse it; never use this path for the
+official release version:
 
 ```bash
 gh workflow run publish-ghcr.yml -f version=v1.3.0 -f source_owner=<owner> -f push_images=true
