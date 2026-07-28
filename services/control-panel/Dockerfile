@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:24-bookworm-slim AS web
+FROM node:26-bookworm-slim AS web
 WORKDIR /src
 COPY web/package*.json ./web/
 RUN --mount=type=cache,target=/root/.npm \
