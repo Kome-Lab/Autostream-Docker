@@ -12,10 +12,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
-# First release implementing the central-only ConfigSHA/grant protocol.
-# This is a compatibility floor, not the version of each bundle release.
-MINIMUM_AGENT_VERSION = "v1.7.0"
+SCHEMA_VERSION = 2
+PROTOCOL_MAJOR = 2
 EXPECTED_SERVICES = (
     "control-panel",
     "discord-bot",
@@ -23,10 +21,12 @@ EXPECTED_SERVICES = (
     "observability",
     "worker",
 )
+EXPECTED_COMPONENTS = (*EXPECTED_SERVICES, "updater")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 VERSION_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-GENERATED_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+PUBLISHED_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
 
 class ManifestError(ValueError):
@@ -40,16 +40,16 @@ def _required_string(component: dict[str, Any], key: str, source: Path) -> str:
     return value
 
 
-def _validate_generated_at(value: str) -> None:
-    if not GENERATED_AT_RE.fullmatch(value):
-        raise ManifestError("generated_at must use RFC3339 UTC second precision")
+def _validate_published_at(value: str) -> None:
+    if not PUBLISHED_AT_RE.fullmatch(value):
+        raise ManifestError("published_at must use RFC3339 UTC second precision")
     try:
         datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError as exc:
-        raise ManifestError("generated_at must be a valid RFC3339 timestamp") from exc
+        raise ManifestError("published_at must be a valid RFC3339 timestamp") from exc
 
 
-def _load_component(source: Path, bundle_version: str) -> dict[str, Any]:
+def _load_component(source: Path, release_id: str) -> dict[str, Any]:
     try:
         raw = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -58,8 +58,21 @@ def _load_component(source: Path, bundle_version: str) -> dict[str, Any]:
         raise ManifestError(f"{source}: component metadata must be a JSON object")
 
     service = _required_string(raw, "service", source)
+    commit = _required_string(raw, "commit", source)
+    if not COMMIT_RE.fullmatch(commit):
+        raise ManifestError(f"{source}: commit must be an exact lowercase source SHA")
+    if service == "updater":
+        if set(raw) != {"service", "commit", "protocol_major"}:
+            raise ManifestError(f"{source}: Updater metadata must contain only service, commit, protocol_major")
+        if type(raw["protocol_major"]) is not int or raw["protocol_major"] != PROTOCOL_MAJOR:
+            raise ManifestError(f"{source}: unsupported Updater protocol_major")
+        return {"service": service, "commit": commit, "protocol_major": PROTOCOL_MAJOR}
     if service not in EXPECTED_SERVICES:
         raise ManifestError(f"{source}: unsupported service {service!r}")
+    allowed = {"service", "source_version", "commit", "image", "manifest_digest",
+               "platform_digests", "rollback_compatible", "database_schema"}
+    if set(raw) - allowed:
+        raise ManifestError(f"{source}: unsupported image component fields")
 
     source_version = _required_string(raw, "source_version", source)
     if not VERSION_RE.fullmatch(source_version):
@@ -67,7 +80,7 @@ def _load_component(source: Path, bundle_version: str) -> dict[str, Any]:
 
     image = _required_string(raw, "image", source)
     expected_image = (
-        f"ghcr.io/kome-lab/autostream-docker/{service}:{bundle_version}"
+        f"ghcr.io/kome-lab/autostream-docker/{service}:{release_id}"
     )
     if image != expected_image:
         raise ManifestError(
@@ -108,6 +121,7 @@ def _load_component(source: Path, bundle_version: str) -> dict[str, Any]:
     return {
         "service": service,
         "source_version": source_version,
+        "commit": commit,
         "image": image,
         "manifest_digest": manifest_digest,
         "platform_digests": {
@@ -119,33 +133,31 @@ def _load_component(source: Path, bundle_version: str) -> dict[str, Any]:
 
 
 def generate_manifest(
-    bundle_version: str, generated_at: str, component_files: list[Path]
+    release_id: str, published_at: str, component_files: list[Path]
 ) -> dict[str, Any]:
-    if not VERSION_RE.fullmatch(bundle_version):
-        raise ManifestError(f"invalid bundle_version {bundle_version!r}")
-    _validate_generated_at(generated_at)
+    if not VERSION_RE.fullmatch(release_id):
+        raise ManifestError(f"invalid release_id {release_id!r}")
+    _validate_published_at(published_at)
 
     components_by_service: dict[str, dict[str, Any]] = {}
     for source in component_files:
-        component = _load_component(source, bundle_version)
+        component = _load_component(source, release_id)
         service = component["service"]
         if service in components_by_service:
             raise ManifestError(f"duplicate component metadata for {service}")
         components_by_service[service] = component
 
-    missing = [service for service in EXPECTED_SERVICES if service not in components_by_service]
+    missing = [service for service in EXPECTED_COMPONENTS if service not in components_by_service]
     if missing:
         raise ManifestError("missing component metadata for: " + ", ".join(missing))
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "release_id": bundle_version,
+        "release_id": release_id,
         "channel": "docker",
-        "published_at": generated_at,
-        "bundle_version": bundle_version,
-        "generated_at": generated_at,
-        "minimum_agent_version": MINIMUM_AGENT_VERSION,
-        "components": [components_by_service[service] for service in EXPECTED_SERVICES],
+        "published_at": published_at,
+        "protocol_major": PROTOCOL_MAJOR,
+        "components": [components_by_service[service] for service in EXPECTED_COMPONENTS],
     }
 
 
@@ -170,8 +182,8 @@ def write_sha256_sidecar(manifest_path: Path, checksum_path: Path) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle-version", required=True)
-    parser.add_argument("--generated-at", required=True)
+    parser.add_argument("--release-id", required=True)
+    parser.add_argument("--published-at", required=True)
     parser.add_argument("--input-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--checksum-output", required=True, type=Path)
@@ -182,8 +194,8 @@ def main() -> int:
     args = parse_args()
     try:
         manifest = generate_manifest(
-            bundle_version=args.bundle_version,
-            generated_at=args.generated_at,
+            release_id=args.release_id,
+            published_at=args.published_at,
             component_files=sorted(args.input_dir.glob("*.json")),
         )
     except ManifestError as exc:

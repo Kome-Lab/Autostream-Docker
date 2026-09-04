@@ -9,7 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github" / "workflows" / "publish-ghcr.yml").read_text(
     encoding="utf-8"
 )
+CI_WORKFLOW = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+    encoding="utf-8"
+)
+SOURCE_VERSIONS = (ROOT / "source-versions.env").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
+CONTRACTS_SHA = "e96ac056e73e00a04f0c22c73122b9f6e18e8b52"
 
 
 class PublishWorkflowContractTests(unittest.TestCase):
@@ -105,25 +110,43 @@ class PublishWorkflowContractTests(unittest.TestCase):
     def test_manifest_sidecar_is_generated_verified_and_uploaded_together(self) -> None:
         self.assertIn("--checksum-output release-manifest.json.sha256", WORKFLOW)
         self.assertIn("sha256sum --check release-manifest.json.sha256", WORKFLOW)
-        self.assertIn('(.minimum_agent_version == "v1.7.0")', WORKFLOW)
+        self.assertIn("(.schema_version == 2)", WORKFLOW)
+        self.assertIn("(.protocol_major == 2)", WORKFLOW)
         self.assertIn("(.release_id == $version)", WORKFLOW)
-        self.assertIn("(.bundle_version == $version)", WORKFLOW)
-        self.assertIn("(.published_at == $generated_at)", WORKFLOW)
-        self.assertIn("(.generated_at == $generated_at)", WORKFLOW)
+        self.assertIn("(.published_at == $published_at)", WORKFLOW)
+        self.assertIn('{service: "updater", commit: $commit, protocol_major: 2}', WORKFLOW)
+        self.assertIn("UPDATER_SOURCE_COMMIT", WORKFLOW)
+        self.assertNotIn("(.minimum_agent_version ==", WORKFLOW)
+        self.assertNotIn("(.bundle_version ==", WORKFLOW)
+        self.assertNotIn("(.generated_at ==", WORKFLOW)
         artifact_step = WORKFLOW.split(
             "- name: Upload release manifest workflow artifact", 1
         )[1].split("- name:", 1)[0]
         self.assertIn("release-manifest.json\n", artifact_step)
         self.assertIn("release-manifest.json.sha256", artifact_step)
 
+    def test_release_manifest_uses_canonical_contracts_validator(self) -> None:
+        self.assertIn("repository: Kome-Lab/Autostream-Contracts", WORKFLOW)
+        self.assertIn(f"ref: {CONTRACTS_SHA}", WORKFLOW)
+        self.assertIn(
+            "cp release-manifest.json .contracts/testdata/release-manifest.docker.generated.json",
+            WORKFLOW,
+        )
+        self.assertIn(
+            "^TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema$",
+            WORKFLOW,
+        )
+
     def test_component_metadata_enforces_service_rollback_policy(self) -> None:
+        self.assertIn("--arg commit '${{ steps.build_meta.outputs.source_commit }}'", WORKFLOW)
+        self.assertIn("source commits differ between platforms", WORKFLOW)
         self.assertIn("rollback_compatible: true", WORKFLOW)
         self.assertIn(
             'database_schema: (if ($service == "control-panel" or $service == "observability") then "backward_compatible" else "none" end)',
             WORKFLOW,
         )
         self.assertIn(
-            "all(.components[]; .rollback_compatible == true)", WORKFLOW
+            "if .service == \"updater\"", WORKFLOW
         )
         self.assertIn(
             'then .database_schema == "backward_compatible"', WORKFLOW
@@ -135,6 +158,31 @@ class PublishWorkflowContractTests(unittest.TestCase):
         self.assertIn("attestations: write", release_job)
         self.assertIn("contents: write", release_job)
         self.assertIn("id-token: write", release_job)
+
+
+class DockerCIWorkflowContractTests(unittest.TestCase):
+    def test_feature_ci_runs_every_python_test_and_rejects_zero_tests(self) -> None:
+        self.assertIn("branches: [main, codex/bundle8b-physical-eol-001]", CI_WORKFLOW)
+        self.assertIn(
+            "python3 -m unittest discover -s tests -p 'test_*.py' -v",
+            CI_WORKFLOW,
+        )
+        self.assertIn("^Ran [1-9][0-9]* tests? in ", CI_WORKFLOW)
+        self.assertIn("zero Docker contract tests ran", CI_WORKFLOW)
+
+    def test_feature_ci_pins_and_runs_canonical_contracts_validator(self) -> None:
+        self.assertIn("repository: Kome-Lab/Autostream-Contracts", CI_WORKFLOW)
+        self.assertIn(f"ref: {CONTRACTS_SHA}", CI_WORKFLOW)
+        self.assertIn("AUTOSTREAM_CONTRACTS_ROOT", CI_WORKFLOW)
+        self.assertIn(
+            "^TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema$",
+            CI_WORKFLOW,
+        )
+
+    def test_updater_source_commit_is_exact_and_current(self) -> None:
+        match = re.search(r"^UPDATER_SOURCE_COMMIT=([0-9a-f]+)$", SOURCE_VERSIONS, re.MULTILINE)
+        self.assertIsNotNone(match)
+        self.assertEqual("40bd9a7175cfc305eb0aa2813f87f87ad57a742a", match.group(1))
 
 
 if __name__ == "__main__":

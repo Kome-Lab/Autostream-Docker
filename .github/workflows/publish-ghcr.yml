@@ -321,10 +321,11 @@ jobs:
           jq -n \
             --arg service '${{ matrix.component.service }}' \
             --arg source_version '${{ steps.source_version.outputs.source_version }}' \
+            --arg commit '${{ steps.build_meta.outputs.source_commit }}' \
             --arg image '${{ steps.image_tags.outputs.image }}' \
             --arg platform '${{ matrix.target.platform }}' \
             --arg digest "${digest}" \
-            '{service: $service, source_version: $source_version, image: $image, platform: $platform, digest: $digest}' \
+            '{service: $service, source_version: $source_version, commit: $commit, image: $image, platform: $platform, digest: $digest}' \
             > 'release-metadata/${{ matrix.component.service }}-${{ matrix.target.arch }}.json'
 
       - name: Upload platform digest metadata
@@ -402,6 +403,7 @@ jobs:
             <<<"${metadata}" >/dev/null
 
           source_version="$(jq -er 'map(.source_version) | unique | if length == 1 then .[0] else error("source versions differ between platforms") end' <<<"${metadata}")"
+          source_commit="$(jq -er 'map(.commit) | unique | if length == 1 then .[0] else error("source commits differ between platforms") end | select(test("^[0-9a-f]{40}$"))' <<<"${metadata}")"
           amd64_digest="$(jq -er '[.[] | select(.platform == "linux/amd64")] | if length == 1 then .[0].digest else error("missing or duplicate linux/amd64 metadata") end' <<<"${metadata}")"
           arm64_digest="$(jq -er '[.[] | select(.platform == "linux/arm64")] | if length == 1 then .[0].digest else error("missing or duplicate linux/arm64 metadata") end' <<<"${metadata}")"
           for digest in "${amd64_digest}" "${arm64_digest}"; do
@@ -412,6 +414,7 @@ jobs:
           done
           {
             echo "source_version=${source_version}"
+            echo "source_commit=${source_commit}"
             echo "amd64_digest=${amd64_digest}"
             echo "arm64_digest=${arm64_digest}"
           } >> "${GITHUB_OUTPUT}"
@@ -449,11 +452,12 @@ jobs:
           jq -n \
             --arg service '${{ matrix.component.service }}' \
             --arg source_version '${{ steps.platform_meta.outputs.source_version }}' \
+            --arg commit '${{ steps.platform_meta.outputs.source_commit }}' \
             --arg image "${image}:${VERSION}" \
             --arg manifest_digest "${manifest_digest}" \
             --arg amd64_digest "${amd64_digest}" \
             --arg arm64_digest "${arm64_digest}" \
-            '{service: $service, source_version: $source_version, image: $image, manifest_digest: $manifest_digest, platform_digests: {"linux/amd64": $amd64_digest, "linux/arm64": $arm64_digest}, rollback_compatible: true, database_schema: (if ($service == "control-panel" or $service == "observability") then "backward_compatible" else "none" end)}' \
+            '{service: $service, source_version: $source_version, commit: $commit, image: $image, manifest_digest: $manifest_digest, platform_digests: {"linux/amd64": $amd64_digest, "linux/arm64": $arm64_digest}, rollback_compatible: true, database_schema: (if ($service == "control-panel" or $service == "observability") then "backward_compatible" else "none" end)}' \
             > 'release-component/${{ matrix.component.service }}.json'
           echo "manifest_digest=${manifest_digest}" >> "${GITHUB_OUTPUT}"
 
@@ -538,6 +542,13 @@ jobs:
       - name: Checkout release manifest generator
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Check out canonical Contracts manifest validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Kome-Lab/Autostream-Contracts
+          ref: e96ac056e73e00a04f0c22c73122b9f6e18e8b52
+          path: .contracts
+
       - name: Download component release metadata
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -545,36 +556,78 @@ jobs:
           path: release-components
           merge-multiple: true
 
+      - name: Record independent Updater metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          source source-versions.env
+          if [[ ! "${UPDATER_SOURCE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::UPDATER_SOURCE_COMMIT must be an exact lowercase source SHA." >&2
+            exit 1
+          fi
+          jq -n \
+            --arg commit "${UPDATER_SOURCE_COMMIT}" \
+            '{service: "updater", commit: $commit, protocol_major: 2}' \
+            > release-components/updater.json
+
       - name: Generate release-manifest.json
         shell: bash
         run: |
           set -euo pipefail
-          generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python3 scripts/generate-release-manifest.py \
-            --bundle-version "${VERSION}" \
-            --generated-at "${generated_at}" \
+            --release-id "${VERSION}" \
+            --published-at "${published_at}" \
             --input-dir release-components \
             --output release-manifest.json \
             --checksum-output release-manifest.json.sha256
           jq -e \
             --arg version "${VERSION}" \
-            --arg generated_at "${generated_at}" \
-            '(.schema_version == 1) and
+            --arg published_at "${published_at}" \
+            '(.schema_version == 2) and
              (.channel == "docker") and
              (.release_id == $version) and
-             (.bundle_version == $version) and
-             (.published_at == $generated_at) and
-             (.generated_at == $generated_at) and
-             (.minimum_agent_version == "v1.7.0") and
-             (.components | length == 5) and
-             (all(.components[]; .rollback_compatible == true)) and
+             (.published_at == $published_at) and
+             (.protocol_major == 2) and
+             ((has("bundle_version") or has("generated_at") or has("minimum_agent_version")) | not) and
+             (.components | length == 6) and
+             (([.components[].service] | unique | sort) == ["control-panel", "discord-bot", "encoder-recorder", "observability", "updater", "worker"]) and
+             (all(.components[]; (.commit | type == "string" and test("^[0-9a-f]{40}$")))) and
              (all(.components[];
-               if (.service == "control-panel" or .service == "observability")
-               then .database_schema == "backward_compatible"
-               else .database_schema == "none"
+               if .service == "updater"
+               then ((keys | sort) == ["commit", "protocol_major", "service"]) and .protocol_major == 2
+               else .rollback_compatible == true and
+                 (if (.service == "control-panel" or .service == "observability")
+                  then .database_schema == "backward_compatible"
+                  else .database_schema == "none"
+                  end)
                end))' \
             release-manifest.json > /dev/null
           sha256sum --check release-manifest.json.sha256
+
+      - name: Validate release manifest against canonical Contracts schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp release-manifest.json .contracts/testdata/release-manifest.docker.generated.json
+          proof="$(mktemp)"
+          trap 'rm -f "$proof"' EXIT
+          (
+            cd .contracts
+            go test -json ./pkg/contracts -run '^TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema$' -count=1
+          ) | tee "$proof"
+          if ! grep -Eq '"Action":"run".*"Test":"TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema"' "$proof"; then
+            echo "zero canonical Contracts manifest validation tests ran" >&2
+            exit 1
+          fi
+          if grep -Eq '"Action":"skip".*"Test":"TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema"' "$proof"; then
+            echo "canonical Contracts manifest validation was skipped" >&2
+            exit 1
+          fi
+          if ! grep -Eq '"Action":"pass".*"Test":"TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema"' "$proof"; then
+            echo "canonical Contracts manifest validation did not pass" >&2
+            exit 1
+          fi
 
       - name: Upload release manifest workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

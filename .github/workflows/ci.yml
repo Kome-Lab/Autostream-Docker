@@ -1,0 +1,59 @@
+name: autostream-docker CI
+
+on:
+  push:
+    branches: [main, codex/bundle8b-physical-eol-001]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out canonical Contracts manifest validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Kome-Lab/Autostream-Contracts
+          ref: e96ac056e73e00a04f0c22c73122b9f6e18e8b52
+          path: .contracts
+      - name: Run all manifest and workflow contract tests
+        shell: bash
+        env:
+          AUTOSTREAM_CONTRACTS_ROOT: ${{ github.workspace }}/.contracts
+        run: |
+          set -euo pipefail
+          proof="$(mktemp)"
+          trap 'rm -f "$proof"' EXIT
+          python3 -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee "$proof"
+          if ! grep -Eq '^Ran [1-9][0-9]* tests? in ' "$proof"; then
+            echo "zero Docker contract tests ran" >&2
+            exit 1
+          fi
+      - name: Validate the canonical Docker fixture against Contracts
+        shell: bash
+        working-directory: .contracts
+        run: |
+          set -euo pipefail
+          proof="$(mktemp)"
+          trap 'rm -f "$proof"' EXIT
+          go test -json ./pkg/contracts -run '^TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema$' -count=1 | tee "$proof"
+          if ! grep -Eq '"Action":"run".*"Test":"TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema"' "$proof"; then
+            echo "zero canonical Contracts manifest validation tests ran" >&2
+            exit 1
+          fi
+          if grep -Eq '"Action":"skip".*"Test":"TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema"' "$proof"; then
+            echo "canonical Contracts manifest validation was skipped" >&2
+            exit 1
+          fi
+          if ! grep -Eq '"Action":"pass".*"Test":"TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema"' "$proof"; then
+            echo "canonical Contracts manifest validation did not pass" >&2
+            exit 1
+          fi
