@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Kome-Lab/Autostream-Contracts
-          ref: e96ac056e73e00a04f0c22c73122b9f6e18e8b52
+          ref: 612ceb539ee74180beae682c4290aba54c49c389
           path: .contracts
       - name: Run all manifest and workflow contract tests
         shell: bash
