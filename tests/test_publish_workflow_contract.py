@@ -15,6 +15,7 @@ CI_WORKFLOW = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
 SOURCE_VERSIONS = (ROOT / "source-versions.env").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 CONTRACTS_SHA = "e96ac056e73e00a04f0c22c73122b9f6e18e8b52"
+CI_CONTRACTS_SHA = "612ceb539ee74180beae682c4290aba54c49c389"
 
 
 class PublishWorkflowContractTests(unittest.TestCase):
@@ -172,7 +173,7 @@ class DockerCIWorkflowContractTests(unittest.TestCase):
 
     def test_feature_ci_pins_and_runs_canonical_contracts_validator(self) -> None:
         self.assertIn("repository: Kome-Lab/Autostream-Contracts", CI_WORKFLOW)
-        self.assertIn(f"ref: {CONTRACTS_SHA}", CI_WORKFLOW)
+        self.assertIn(f"ref: {CI_CONTRACTS_SHA}", CI_WORKFLOW)
         self.assertIn("AUTOSTREAM_CONTRACTS_ROOT", CI_WORKFLOW)
         self.assertIn(
             "^TestDockerReleaseManifestGeneratorShapeValidatesAgainstSchema$",
@@ -182,7 +183,7 @@ class DockerCIWorkflowContractTests(unittest.TestCase):
     def test_updater_source_commit_is_exact_and_current(self) -> None:
         match = re.search(r"^UPDATER_SOURCE_COMMIT=([0-9a-f]+)$", SOURCE_VERSIONS, re.MULTILINE)
         self.assertIsNotNone(match)
-        self.assertEqual("40bd9a7175cfc305eb0aa2813f87f87ad57a742a", match.group(1))
+        self.assertEqual("ae9ae60d97a5c7e5ece9ee884e83a0a2cbdb48c7", match.group(1))
 
 
 if __name__ == "__main__":
