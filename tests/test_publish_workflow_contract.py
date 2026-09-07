@@ -183,7 +183,7 @@ class DockerCIWorkflowContractTests(unittest.TestCase):
     def test_updater_source_commit_is_exact_and_current(self) -> None:
         match = re.search(r"^UPDATER_SOURCE_COMMIT=([0-9a-f]+)$", SOURCE_VERSIONS, re.MULTILINE)
         self.assertIsNotNone(match)
-        self.assertEqual("67f9a8ce863249f001ea23cfa5307ad6129d40c5", match.group(1))
+        self.assertEqual("2b424af6d39fa97fde6184366d4cbcd1130d6419", match.group(1))
 
 
 if __name__ == "__main__":
