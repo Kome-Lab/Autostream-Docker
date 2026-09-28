@@ -16,6 +16,7 @@ SOURCE_VERSIONS = (ROOT / "source-versions.env").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 CONTRACTS_SHA = "e96ac056e73e00a04f0c22c73122b9f6e18e8b52"
 CI_CONTRACTS_SHA = "612ceb539ee74180beae682c4290aba54c49c389"
+CANDIDATE = (ROOT / ".github/workflows/release-candidate.yml").read_text(encoding="utf-8")
 
 
 class PublishWorkflowContractTests(unittest.TestCase):
@@ -184,6 +185,115 @@ class DockerCIWorkflowContractTests(unittest.TestCase):
         match = re.search(r"^UPDATER_SOURCE_COMMIT=([0-9a-f]+)$", SOURCE_VERSIONS, re.MULTILINE)
         self.assertIsNotNone(match)
         self.assertEqual("794d0cd69dd1b3ca130101f7769aaf8ac1274ac8", match.group(1))
+
+
+class V2DistributionContractTests(unittest.TestCase):
+    def test_five_source_versions_and_preflight_map(self):
+        versions = re.findall(r"^(\w+_SOURCE_VERSION)=(.+)$", SOURCE_VERSIONS, re.MULTILINE)
+        self.assertEqual(5, len(versions))
+        self.assertEqual({"v2.0.0"}, {value for _, value in versions})
+        preflight, build = WORKFLOW.split("\n  publish:\n", 1)
+        self.assertIn("source_map: ${{ steps.sources.outputs.source_map }}", preflight)
+        self.assertIn("--mode publish", preflight)
+        self.assertLess(preflight.index("--mode publish"), preflight.index("Login to GHCR"))
+        self.assertIn("needs: release-preflight", build)
+        self.assertIn("SOURCE_MAP: ${{ needs.release-preflight.outputs.source_map }}", build)
+        self.assertIn("ref: ${{ steps.source_version.outputs.source_commit || steps.source_version.outputs.source_version }}", build)
+        self.assertIn('--service "${SERVICE}" --checkout "${SOURCE_PATH}"', build)
+
+    def test_v2_rechecks_after_build_and_pushes_same_loaded_image(self):
+        build = WORKFLOW.split("- name: Build and optionally push", 1)[1].split("- name: Publish verified v2 image", 1)[0]
+        self.assertIn("push: ${{ env.PUSH_IMAGES == 'true' && env.VERSION != 'v2.0.0' }}", build)
+        self.assertIn("load: ${{ env.VERSION == 'v2.0.0' }}", build)
+        publish = WORKFLOW.split("- name: Publish verified v2 image", 1)[1].split("- name: Record platform digest", 1)[0]
+        self.assertLess(publish.index("--mode publish"), publish.index('docker push "${IMAGE_TAG}"'))
+        self.assertNotIn("docker build", publish)
+        self.assertIn("docker image inspect", publish)
+        self.assertIn("steps.v2_push.outputs.digest || steps.build.outputs.digest", WORKFLOW)
+        for name in ("Publish version manifest", "Publish latest manifest"):
+            step = WORKFLOW.split("- name: " + name, 1)[1].split("- name:", 1)[0]
+            self.assertLess(step.index("--mode publish"), step.index("docker buildx imagetools create"))
+
+    def test_existing_platform_and_manifest_denominators_remain_strict(self):
+        self.assertIn('"${#metadata_files[@]}" -ne 2', WORKFLOW)
+        self.assertIn('source versions differ between platforms', WORKFLOW)
+        self.assertIn('source commits differ between platforms', WORKFLOW)
+        self.assertIn('missing or duplicate linux/amd64 metadata', WORKFLOW)
+        self.assertIn('missing or duplicate linux/arm64 metadata', WORKFLOW)
+        self.assertIn('(.components | length == 6)', WORKFLOW)
+        self.assertIn('(.schema_version == 2)', WORKFLOW)
+
+    def test_candidate_only_accepts_manual_branch_v2_and_read_permissions(self):
+        trigger = CANDIDATE.split('\non:\n', 1)[1].split('\npermissions:', 1)[0]
+        self.assertEqual(['workflow_dispatch'], re.findall(r'^  ([a-z_]+):$', trigger, re.MULTILINE))
+        self.assertEqual(['version'], re.findall(r'^      ([a-z_]+):$', trigger, re.MULTILINE))
+        self.assertIn('options: [v2.0.0]', trigger)
+        preflight = CANDIDATE.split('\n  candidate:\n', 1)[0]
+        self.assertIn('test "${GITHUB_REF_TYPE}" = branch', preflight)
+        self.assertLess(preflight.index('test "${GITHUB_REF_TYPE}"'), preflight.index('--mode candidate'))
+        self.assertIn('needs: candidate-preflight', CANDIDATE)
+        self.assertNotRegex(CANDIDATE, re.compile(r'^\s+[a-z-]+: write$', re.MULTILINE), 'no write permission')
+        self.assertEqual(['contents', 'contents', 'contents'], re.findall(r'^\s+([a-z-]+): read$', CANDIDATE, re.MULTILINE))
+        self.assertNotIn('id-token:', CANDIDATE)
+        self.assertNotIn('continue-on-error:', CANDIDATE)
+        self.assertNotIn('login-action', CANDIDATE)
+        self.assertNotRegex(CANDIDATE, r'gh (?:release|workflow|run)|docker push|:latest')
+        self.assertEqual(['false'], re.findall(r'^\s+push: (.+)$', CANDIDATE, re.MULTILINE))
+
+    def test_candidate_and_publish_use_the_same_ten_native_builds(self):
+        def components(workflow):
+            return re.findall(r'- service: (\S+)\n\s+repo: (\S+)\n\s+dockerfile: (\S+)', workflow)
+        self.assertEqual(components(WORKFLOW), components(CANDIDATE))
+        self.assertEqual(5, len(components(CANDIDATE)))
+        targets = re.findall(r'- platform: (\S+)\n\s+arch: (\S+)\n\s+runner: (\S+)', CANDIDATE)
+        self.assertEqual([('linux/amd64', 'amd64', 'ubuntu-24.04'), ('linux/arm64', 'arm64', 'ubuntu-24.04-arm')], targets)
+        self.assertEqual(targets, re.findall(r'- platform: (\S+)\n\s+arch: (\S+)\n\s+runner: (\S+)', WORKFLOW))
+        self.assertEqual(10, len(components(CANDIDATE)) * len(targets))
+        self.assertIn('amd64/x86_64|arm64/aarch64)', CANDIDATE)
+        self.assertIn('type=oci,dest=', CANDIDATE)
+        for action in re.findall(r'uses: ([^\s]+)', CANDIDATE):
+            self.assertRegex(action, r'@[0-9a-f]{40}$')
+            self.assertIn(action, WORKFLOW)
+
+    def test_pinned_recursive_submodules_and_checkout_sha(self):
+        for workflow in (WORKFLOW, CANDIDATE):
+            self.assertIn('submodules: recursive', workflow)
+            self.assertNotIn('submodule update --remote', workflow)
+            self.assertIn('--checkout "${SOURCE_PATH}"', workflow)
+        self.assertIn('ref: ${{ steps.source.outputs.commit }}', CANDIDATE)
+        self.assertIn('SOURCE_MAP: ${{ needs.candidate-preflight.outputs.source_map }}', CANDIDATE)
+
+    def test_dave_recipe_keeps_native_cgo_and_build_identity(self):
+        recipe = (ROOT / 'services/discord-bot/Dockerfile').read_text()
+        self.assertNotIn('$BUILDPLATFORM', recipe)
+        self.assertIn('test "${TARGETOS}/${TARGETARCH}" = "$(go env GOOS)/$(go env GOARCH)"', recipe)
+        for required in ('cmake ninja-build g++ make pkg-config autoconf automake', 'libtool zip unzip tar',
+                         'COPY third_party ./third_party', 'make -C third_party/discordgo/dave/libdave/cpp BUILD_TYPE=Release',
+                         'vcpkg_commit=16c71a39e5a0fc0bdb3fad03beef8f38ee00ee3b',
+                         'fetch --no-tags --no-write-fetch-head',
+                         '-c core.bare=false diff --exit-code "$vcpkg_commit" -- .',
+                         'CGO_ENABLED=1', 'CGO_CFLAGS=', 'CGO_LDFLAGS=', '-lstdc++ -lm -ldl -lpthread',
+                         'FROM gcr.io/distroless/cc-debian13', 'USER nonroot:nonroot',
+                         'ENV AUTOSTREAM_NODE_CONFIG=/etc/autostream-discord-bot/config.yml',
+                         'ENTRYPOINT ["/usr/local/bin/autostream-discord-bot"]'):
+            self.assertIn(required, recipe)
+        self.assertNotIn('CGO_ENABLED=0', recipe)
+        self.assertNotIn('fetch --all', recipe)
+        self.assertNotIn('submodule update --remote', recipe)
+        for field in ('Version=${VERSION}', 'Commit=${COMMIT}', 'BuildDate=${BUILD_DATE}'):
+            self.assertIn(field, recipe)
+
+    def test_worker_font_state_nonroot_and_build_identity(self):
+        recipe = (ROOT / 'services/worker/Dockerfile').read_text()
+        for required in ('FROM debian:trixie-slim', 'ca-certificates fontconfig fonts-noto-cjk',
+                         'test -r /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+                         'install -d -m 0750 -o 65532 -g 65532 /var/lib/autostream/worker',
+                         'ENV AUTOSTREAM_SCENE_FONT_FILE=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+                         'ENV AUTOSTREAM_NODE_CONFIG=/etc/autostream-worker/config.yml',
+                         'USER 65532:65532', 'ENTRYPOINT ["/usr/local/bin/autostream-worker"]'):
+            self.assertIn(required, recipe)
+        for field in ('Version=${VERSION}', 'Commit=${COMMIT}', 'BuildDate=${BUILD_DATE}'):
+            self.assertIn(field, recipe)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,277 @@
+name: Build private v2 release candidates
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Reviewed candidate version
+        required: true
+        default: v2.0.0
+        type: choice
+        options: [v2.0.0]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autostream-release-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  candidate-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      source_map: ${{ steps.sources.outputs.source_map }}
+    steps:
+      - name: Require a branch and the reviewed version
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF_TYPE}" = branch
+          test "${VERSION_INPUT}" = v2.0.0
+
+      - name: Checkout Dockerfiles
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve all five locked candidate sources without tags
+        id: sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_map="$(python3 scripts/resolve-release-sources.py --mode candidate)"
+          echo "source_map=${source_map}" >> "${GITHUB_OUTPUT}"
+
+  candidate:
+    needs: candidate-preflight
+    runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - service: control-panel
+            repo: Autostream-ControlPanel
+            dockerfile: services/control-panel/Dockerfile
+          - service: discord-bot
+            repo: Autostream-DiscordBot
+            dockerfile: services/discord-bot/Dockerfile
+          - service: encoder-recorder
+            repo: Autostream-Encoder-Recorder
+            dockerfile: services/encoder-recorder/Dockerfile
+          - service: observability
+            repo: Autostream-Observability
+            dockerfile: services/observability/Dockerfile
+          - service: worker
+            repo: Autostream-Worker
+            dockerfile: services/worker/Dockerfile
+        target:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      DOCKER_BUILD_SUMMARY: "false"
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+    steps:
+      - name: Checkout Dockerfiles
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: dockerfiles
+          persist-credentials: false
+
+      - name: Select the preflight source SHA
+        id: source
+        shell: bash
+        env:
+          SOURCE_MAP: ${{ needs.candidate-preflight.outputs.source_map }}
+          SERVICE: ${{ matrix.component.service }}
+        run: |
+          set -euo pipefail
+          commit="$(jq -er --arg service "${SERVICE}" '.[$service].commit | select(test("^[0-9a-f]{40}$"))' <<<"${SOURCE_MAP}")"
+          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout the locked source and fixed gitlinks
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Kome-Lab/${{ matrix.component.repo }}
+          ref: ${{ steps.source.outputs.commit }}
+          path: source/${{ matrix.component.repo }}
+          token: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify checkout and native platform
+        id: build_meta
+        shell: bash
+        env:
+          SERVICE: ${{ matrix.component.service }}
+          SOURCE_PATH: source/${{ matrix.component.repo }}
+          TARGET_ARCH: ${{ matrix.target.arch }}
+        run: |
+          set -euo pipefail
+          test "$(git -C dockerfiles rev-parse HEAD)" = "${GITHUB_SHA}"
+          python3 dockerfiles/scripts/resolve-release-sources.py --mode candidate \
+            --service "${SERVICE}" --checkout "${SOURCE_PATH}" > /dev/null
+          case "${TARGET_ARCH}/$(uname -m)" in
+            amd64/x86_64|arm64/aarch64) ;;
+            *) echo 'native build architecture mismatch' >&2; exit 1 ;;
+          esac
+          mkdir -p "${RUNNER_TEMP}/candidate"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Build local OCI candidate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: source/${{ matrix.component.repo }}
+          file: dockerfiles/${{ matrix.component.dockerfile }}
+          platforms: ${{ matrix.target.platform }}
+          push: false
+          provenance: false
+          outputs: type=oci,dest=${{ runner.temp }}/candidate/image.oci.tar
+          build-args: |
+            VERSION=v2.0.0
+            COMMIT=${{ steps.source.outputs.commit }}
+            BUILD_DATE=${{ steps.build_meta.outputs.build_date }}
+          labels: |
+            org.opencontainers.image.version=v2.0.0
+            org.opencontainers.image.revision=${{ steps.source.outputs.commit }}
+            org.opencontainers.image.source=https://github.com/Kome-Lab/${{ matrix.component.repo }}
+
+      - name: Verify OCI identity and write candidate metadata
+        shell: bash
+        env:
+          SERVICE: ${{ matrix.component.service }}
+          PLATFORM: ${{ matrix.target.platform }}
+          DOCKERFILES_ROOT: dockerfiles
+          CANDIDATE_DIR: ${{ runner.temp }}/candidate
+          DOCKER_WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import tarfile
+
+          root = Path(os.environ['DOCKERFILES_ROOT'])
+          output = Path(os.environ['CANDIDATE_DIR'])
+          archive = output / 'image.oci.tar'
+          lock_path = root / 'release/v2.0.0-source-lock.json'
+          source = next(row for row in json.loads(lock_path.read_bytes())['services']
+                        if row['service'] == os.environ['SERVICE'])
+          expected_platform = os.environ['PLATFORM']
+          workflow_sha = os.environ['DOCKER_WORKFLOW_SHA']
+          if not re.fullmatch('[0-9a-f]{40}', workflow_sha):
+              raise ValueError('missing Docker workflow source SHA')
+          images = []
+          with tarfile.open(archive, 'r:*') as package:
+              names = [member.name for member in package.getmembers()]
+              if len(names) != len(set(names)):
+                  raise ValueError('duplicate OCI archive paths')
+              def read_file(name):
+                  member = package.getmember(name)
+                  if not member.isfile() or member.size > 16 * 1024 * 1024:
+                      raise ValueError('invalid OCI metadata member')
+                  return package.extractfile(member).read()
+              def blob(descriptor):
+                  digest = descriptor['digest']
+                  if not re.fullmatch('sha256:[0-9a-f]{64}', digest):
+                      raise ValueError('invalid OCI descriptor digest')
+                  data = read_file('blobs/sha256/' + digest.split(':')[1])
+                  if len(data) != descriptor['size'] or hashlib.sha256(data).hexdigest() != digest.split(':')[1]:
+                      raise ValueError('OCI descriptor identity mismatch')
+                  return json.loads(data)
+              def walk(descriptor, depth=0):
+                  if depth > 4:
+                      raise ValueError('excessive OCI index nesting')
+                  value = blob(descriptor)
+                  if 'manifests' in value:
+                      for child in value['manifests']:
+                          walk(child, depth + 1)
+                  else:
+                      for layer in value['layers']:
+                          digest = layer['digest']
+                          if not re.fullmatch('sha256:[0-9a-f]{64}', digest):
+                              raise ValueError('invalid OCI layer digest')
+                          member = package.getmember('blobs/sha256/' + digest.split(':')[1])
+                          if not member.isfile() or member.size != layer['size']:
+                              raise ValueError('invalid OCI layer size/type')
+                          measured = hashlib.sha256()
+                          with package.extractfile(member) as stream:
+                              for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                                  measured.update(chunk)
+                          if measured.hexdigest() != digest.split(':')[1]:
+                              raise ValueError('OCI layer identity mismatch')
+                      images.append(blob(value['config']))
+              if json.loads(read_file('oci-layout')) != {'imageLayoutVersion': '1.0.0'}:
+                  raise ValueError('invalid OCI layout')
+              for descriptor in json.loads(read_file('index.json'))['manifests']:
+                  walk(descriptor)
+          if len(images) != 1:
+              raise ValueError('expected exactly one platform image')
+          config = images[0]
+          platform = config['os'] + '/' + config['architecture']
+          if platform != expected_platform:
+              raise ValueError('archive architecture mismatch')
+          if platform not in ('linux/amd64', 'linux/arm64'):
+              raise ValueError('unsupported candidate platform')
+          labels = config['config']['Labels']
+          if (labels.get('org.opencontainers.image.revision') != source['commit']
+                  or labels.get('org.opencontainers.image.version') != source['source_version']
+                  or labels.get('org.opencontainers.image.source') != 'https://github.com/' + source['repository']):
+              raise ValueError('archive source identity mismatch')
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open('rb') as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                      digest.update(chunk)
+              return digest.hexdigest()
+          metadata = {
+              'candidate_schema_version': 1,
+              'kind': 'unpublished-oci-candidate',
+              'release_id': 'v2.0.0',
+              'source': source,
+              'docker_workflow_source_sha': workflow_sha,
+              'dockerfile_sha256': sha256(root / source['dockerfile']),
+              'source_lock_sha256': sha256(lock_path),
+              'platform': platform,
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'archive': {'file': archive.name, 'sha256': sha256(archive), 'size': archive.stat().st_size},
+          }
+          if metadata['run_id'] <= 0 or metadata['run_attempt'] <= 0:
+              raise ValueError('missing candidate run identity')
+          (output / 'candidate-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
+          (output / 'SHA256SUMS').write_text(
+              ''.join(f'{sha256(output / name)}  {name}\n' for name in ('image.oci.tar', 'candidate-metadata.json')),
+              encoding='utf-8')
+          PY
+
+      - name: Preserve candidate archive and metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-v2.0.0-${{ matrix.component.service }}-${{ matrix.target.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/candidate/image.oci.tar
+            ${{ runner.temp }}/candidate/candidate-metadata.json
+            ${{ runner.temp }}/candidate/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

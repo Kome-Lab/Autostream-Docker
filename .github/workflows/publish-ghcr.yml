@@ -58,6 +58,11 @@ env:
   PUSH_IMAGES: ${{ github.ref_type == 'tag' || inputs.push_images }}
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: ${{ github.repository_owner }}/Autostream-Docker
+  CONTROL_PANEL_INPUT: ${{ inputs.control_panel_version }}
+  DISCORD_BOT_INPUT: ${{ inputs.discord_bot_version }}
+  ENCODER_RECORDER_INPUT: ${{ inputs.encoder_recorder_version }}
+  OBSERVABILITY_INPUT: ${{ inputs.observability_version }}
+  WORKER_INPUT: ${{ inputs.worker_version }}
 
 jobs:
   release-preflight:
@@ -66,7 +71,15 @@ jobs:
       contents: read
       packages: read
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      source_map: ${{ steps.sources.outputs.source_map }}
     steps:
+      - name: Checkout source resolver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Validate immutable version
         shell: bash
         run: |
@@ -75,6 +88,17 @@ jobs:
             echo "::error::Version must look like v1.3.0; got ${VERSION}" >&2
             exit 1
           fi
+
+      - name: Verify all five v2 source tags before any image publication
+        id: sources
+        if: env.VERSION == 'v2.0.0'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          source_map="$(python3 scripts/resolve-release-sources.py --mode publish --version "${VERSION}" --source-owner "${SOURCE_OWNER}")"
+          echo "source_map=${source_map}" >> "${GITHUB_OUTPUT}"
 
       - name: Refuse an existing GitHub Release
         if: github.ref_type == 'tag'
@@ -141,6 +165,7 @@ jobs:
       contents: read
       packages: write
     runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -186,18 +211,23 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: dockerfiles
+          persist-credentials: false
 
       - name: Resolve source version
         id: source_version
         shell: bash
         env:
-          CONTROL_PANEL_INPUT: ${{ inputs.control_panel_version }}
-          DISCORD_BOT_INPUT: ${{ inputs.discord_bot_version }}
-          ENCODER_RECORDER_INPUT: ${{ inputs.encoder_recorder_version }}
-          OBSERVABILITY_INPUT: ${{ inputs.observability_version }}
-          WORKER_INPUT: ${{ inputs.worker_version }}
+          SOURCE_MAP: ${{ needs.release-preflight.outputs.source_map }}
+          SERVICE: ${{ matrix.component.service }}
         run: |
           set -euo pipefail
+          if [[ "${VERSION}" == 'v2.0.0' ]]; then
+            source_commit="$(jq -er --arg service "${SERVICE}" '.[$service].commit | select(test("^[0-9a-f]{40}$"))' <<<"${SOURCE_MAP}")"
+            source_version="$(jq -er --arg service "${SERVICE}" '.[$service].source_version | select(. == "v2.0.0")' <<<"${SOURCE_MAP}")"
+            echo "source_commit=${source_commit}" >> "${GITHUB_OUTPUT}"
+            echo "source_version=${source_version}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
           source_version=""
           case "${{ matrix.component.service }}" in
             control-panel) source_version="${CONTROL_PANEL_INPUT}" ;;
@@ -232,6 +262,7 @@ jobs:
           echo "Using ${{ matrix.component.repo }} source tag ${source_version} for image ${VERSION} on ${{ matrix.target.platform }}."
 
       - name: Verify source access
+        if: env.VERSION != 'v2.0.0'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
@@ -250,9 +281,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.SOURCE_OWNER }}/${{ matrix.component.repo }}
-          ref: ${{ steps.source_version.outputs.source_version }}
+          ref: ${{ steps.source_version.outputs.source_commit || steps.source_version.outputs.source_version }}
           path: source/${{ matrix.component.repo }}
           token: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify v2 source checkout and pinned submodules
+        if: env.VERSION == 'v2.0.0'
+        shell: bash
+        env:
+          SERVICE: ${{ matrix.component.service }}
+          SOURCE_PATH: source/${{ matrix.component.repo }}
+        run: |
+          set -euo pipefail
+          python3 dockerfiles/scripts/resolve-release-sources.py --mode candidate \
+            --service "${SERVICE}" --checkout "${SOURCE_PATH}" > /dev/null
 
       - name: Resolve build metadata
         id: build_meta
@@ -294,7 +338,9 @@ jobs:
           context: source/${{ matrix.component.repo }}
           file: dockerfiles/${{ matrix.component.dockerfile }}
           platforms: ${{ matrix.target.platform }}
-          push: ${{ env.PUSH_IMAGES == 'true' }}
+          # v2 is loaded first, then published without rebuilding after a fresh tag check.
+          push: ${{ env.PUSH_IMAGES == 'true' && env.VERSION != 'v2.0.0' }}
+          load: ${{ env.VERSION == 'v2.0.0' }}
           provenance: false
           tags: ${{ steps.image_tags.outputs.tags }}
           build-args: |
@@ -307,12 +353,35 @@ jobs:
             org.opencontainers.image.revision=${{ steps.build_meta.outputs.source_commit }}
             org.opencontainers.image.source=https://github.com/${{ env.SOURCE_OWNER }}/${{ matrix.component.repo }}
 
+      - name: Publish verified v2 image without rebuilding
+        id: v2_push
+        if: env.VERSION == 'v2.0.0' && env.PUSH_IMAGES == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
+          IMAGE_TAG: ${{ steps.image_tags.outputs.image }}:${{ env.VERSION }}-${{ matrix.target.arch }}
+          PLATFORM: ${{ matrix.target.platform }}
+          SOURCE_COMMIT: ${{ steps.build_meta.outputs.source_commit }}
+          SOURCE_PATH: source/${{ matrix.component.repo }}
+          SERVICE: ${{ matrix.component.service }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${IMAGE_TAG}")" = "${PLATFORM}"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${IMAGE_TAG}")" = "${SOURCE_COMMIT}"
+          python3 dockerfiles/scripts/resolve-release-sources.py --mode publish \
+            --version "${VERSION}" --source-owner "${SOURCE_OWNER}" \
+            --service "${SERVICE}" --checkout "${SOURCE_PATH}" > /dev/null
+          docker push "${IMAGE_TAG}" | tee "${RUNNER_TEMP}/v2-push.txt"
+          digest="$(sed -nE 's/^.*: digest: (sha256:[0-9a-f]{64}) size: [0-9]+$/\1/p' "${RUNNER_TEMP}/v2-push.txt")"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
       - name: Record platform digest
         if: env.PUSH_IMAGES == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          digest='${{ steps.build.outputs.digest }}'
+          digest='${{ steps.v2_push.outputs.digest || steps.build.outputs.digest }}'
           if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::Build did not return an immutable sha256 digest: ${digest}" >&2
             exit 1
@@ -348,6 +417,7 @@ jobs:
       id-token: write
       packages: write
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -359,6 +429,11 @@ jobs:
           - service: worker
 
     steps:
+      - name: Checkout source resolver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GHCR
@@ -421,8 +496,16 @@ jobs:
 
       - name: Publish version manifest
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
+          SERVICE: ${{ matrix.component.service }}
+          BUILT_COMMIT: ${{ steps.platform_meta.outputs.source_commit }}
         run: |
           set -euo pipefail
+          if [[ "${VERSION}" == 'v2.0.0' ]]; then
+            source_map="$(python3 scripts/resolve-release-sources.py --mode publish --version "${VERSION}" --source-owner "${SOURCE_OWNER}")"
+            test "$(jq -er --arg service "${SERVICE}" '.[$service].commit' <<<"${source_map}")" = "${BUILT_COMMIT}"
+          fi
           image="${{ steps.image_ref.outputs.image }}"
           docker buildx imagetools create \
             -t "${image}:${VERSION}" \
@@ -463,8 +546,13 @@ jobs:
 
       - name: Publish latest manifest
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
         run: |
           set -euo pipefail
+          if [[ "${VERSION}" == 'v2.0.0' ]]; then
+            python3 scripts/resolve-release-sources.py --mode publish --version "${VERSION}" --source-owner "${SOURCE_OWNER}" > /dev/null
+          fi
           if [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             image="${{ steps.image_ref.outputs.image }}"
             docker buildx imagetools create \
@@ -537,6 +625,7 @@ jobs:
       contents: write
       id-token: write
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Checkout release manifest generator
@@ -651,6 +740,15 @@ jobs:
         if: steps.release_attestation.outcome == 'failure'
         shell: bash
         run: echo '::warning::GitHub artifact attestations are unavailable for this repository or plan; the release manifest remains bound to immutable image digests.'
+
+      - name: Recheck v2 source tags before release publication
+        if: env.VERSION == 'v2.0.0'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUTOSTREAM_SOURCE_TOKEN || secrets.GITHUBTOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/resolve-release-sources.py --mode publish --version "${VERSION}" --source-owner "${SOURCE_OWNER}" > /dev/null
 
       - name: Create GitHub Release and attach release manifest
         shell: bash
