@@ -6,7 +6,7 @@
       "service": "control-panel",
       "repository": "Kome-Lab/Autostream-ControlPanel",
       "source_version": "v2.0.0",
-      "commit": "fade8df68aacc2ce484a2ace470f12789eb83f82",
+      "commit": "623dd7f55b4f0023af9586c0f354435ecce3ae96",
       "dockerfile": "services/control-panel/Dockerfile"
     },
     {
@@ -20,7 +20,7 @@
       "service": "encoder-recorder",
       "repository": "Kome-Lab/Autostream-Encoder-Recorder",
       "source_version": "v2.0.0",
-      "commit": "a80feec94a21796b92fe432ab06d4e18dbd36485",
+      "commit": "a000f9add02cd358d8b1acdc60cbc9edbbaea643",
       "dockerfile": "services/encoder-recorder/Dockerfile"
     },
     {
