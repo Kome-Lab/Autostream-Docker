@@ -6,7 +6,7 @@
       "service": "control-panel",
       "repository": "Kome-Lab/Autostream-ControlPanel",
       "source_version": "v2.0.0",
-      "commit": "623dd7f55b4f0023af9586c0f354435ecce3ae96",
+      "commit": "0315845e3af01eff6b97c6164db3ddc3109b55af",
       "dockerfile": "services/control-panel/Dockerfile"
     },
     {
