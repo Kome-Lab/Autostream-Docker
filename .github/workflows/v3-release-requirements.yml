@@ -1,0 +1,75 @@
+name: v3 Release Return Requirements
+on:
+  pull_request:
+    branches: [v3-dev]
+
+permissions:
+  contents: read
+
+jobs:
+  v3-release-requirements-checks:
+    name: v3-release-requirements-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+      GOFLAGS: '-mod=readonly'
+      GOTELEMETRY: 'off'
+      GOMAXPROCS: '2'
+      # Canonical pure evaluator and conformance source; no actuation or release.
+      IU_WS6_UPDATER_COMMIT: '5741d48d94f6fe7c6727f637ea32667860882dfd'
+    steps:
+      - name: Checkout exact Docker candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: docker
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require an immutable Updater evaluator candidate
+        run: |
+          set -euo pipefail
+          test "$IU_WS6_UPDATER_COMMIT" != 0000000000000000000000000000000000000000
+          test "${#IU_WS6_UPDATER_COMMIT}" = 40
+      - name: Checkout exact canonical evaluator source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Kome-Lab/Autostream-Updater
+          ref: ${{ env.IU_WS6_UPDATER_COMMIT }}
+          path: updater
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up pinned Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.26.5'
+          check-latest: false
+          cache: false
+      - name: Build the single read-only evaluator and compare exact vectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C updater rev-parse HEAD)" = "$IU_WS6_UPDATER_COMMIT"
+          test "$(go env GOVERSION)" = go1.26.5
+          git -C docker log -1 --format='Docker tested commit: %H%nDocker tested tree: %T'
+          git -C updater log -1 --format='Updater tested commit: %H%nUpdater tested tree: %T'
+          (cd updater && python3 scripts/ci/iu-source-boundary.py)
+          (cd updater && python3 scripts/ci/iu-module-pin.py cdc106ab795623e41e2fe42a73c598c782e5c8de --download)
+          (cd updater && CGO_ENABLED=0 go build -p 1 -trimpath -o "$RUNNER_TEMP/ws6-evaluator" ./tools/check-v3-release-requirements)
+          export IU_WS6_EVALUATOR="$RUNNER_TEMP/ws6-evaluator"
+          export IU_WS6_UPDATER_SOURCE="$GITHUB_WORKSPACE/updater"
+          cmp updater/internal/releasequalification/testdata/conformance.json docker/testdata/v3-release-requirements/conformance.json
+          cd docker
+          python3 tools/run-v3-release-requirements-tests.py "$RUNNER_TEMP/ws6-docker-tests.json"
+          python3 tools/check-v3-source-boundary.py
+          git diff --exit-code
+          git -C ../updater diff --exit-code -- go.mod go.sum
+      - name: Preserve exact execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: iu-ws6-docker-root-events-${{ github.sha }}
+          path: ${{ runner.temp }}/ws6-docker-tests.json
+          if-no-files-found: error
+          retention-days: 14

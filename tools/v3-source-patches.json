@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "baseline": "5322ed42bba9e29ed39b1e5a09689ec93644c462",
+  "new": {
+    ".github/workflows/v3-release-requirements.yml": "9f35c621ae7ff740294000204159428a07857b7e17de95358575e6f053022031",
+    "docs/v3-release-requirements.md": "87fc065cd30676bd9f3f31f2776d35ff3645637c693d4cd4cd3fac74576611e3",
+    "testdata/v3-release-requirements/conformance.json": "f3d92b1af44c2a73084fc33cf176c662d6ccb031d57c5eba445f2b8299022999",
+    "tools/check-v3-release-requirements.py": "a118cbfe853bccddfa326d3040b380a476173a521ce9e50a7b4d483e00cee182",
+    "tools/check-v3-source-boundary.py": "8141469b7c4e0b60d9e43693b379746bdb60fba5ff2300f23e0088b16150e1ea",
+    "tools/run-v3-release-requirements-tests.py": "f70ba7e78d09803913417d8ed11fd72dd60405733395f2a48608a53152780fae",
+    "tools/tests/test_v3_release_requirements.py": "fdd47d32926a1f191cc057ec949a5a5705c24c9fdeddb1477ef7234a668059bb",
+    "tools/ws6-required-tests.txt": "0c510c65c3f07fe122dfdd8480c5458fabb745c2aad6ec88b0d47e8569faebd9"
+  },
+  "patches": {}
+}
